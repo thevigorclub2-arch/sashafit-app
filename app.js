@@ -990,16 +990,21 @@ document.addEventListener('change', async e => {
    Старт
    ===================================================================== */
 async function realAuth() {
-  let r, j;
-  try {
-    r = await fetch(CFG.SUPABASE_URL + '/functions/v1/telegram-auth', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', apikey: CFG.SUPABASE_ANON_KEY, Authorization: 'Bearer ' + CFG.SUPABASE_ANON_KEY },
-      body: JSON.stringify({ initData: tg.initData })
-    });
-  } catch (e) { throw new Error('немає звʼязку з функцією входу (' + (e && e.message ? e.message : e) + ')'); }
+  // Функція входу зазвичай називається telegram-auth, але Supabase міг дати їй іншу назву (наприклад dynamic-task).
+  const names = [CFG.AUTH_FUNCTION, 'telegram-auth', 'dynamic-task'].filter(Boolean);
+  let r = null, j = {};
+  for (let i = 0; i < names.length; i++) {
+    try {
+      r = await fetch(CFG.SUPABASE_URL + '/functions/v1/' + names[i], {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', apikey: CFG.SUPABASE_ANON_KEY, Authorization: 'Bearer ' + CFG.SUPABASE_ANON_KEY },
+        body: JSON.stringify({ initData: tg.initData })
+      });
+    } catch (e) { throw new Error('немає звʼязку з функцією входу (' + (e && e.message ? e.message : e) + ')'); }
+    if (r.status !== 404) break;
+  }
   j = await r.json().catch(() => ({}));
-  if (!r.ok || !j.token_hash) throw new Error('функція входу відповіла ' + r.status + ': ' + (j.error || j.message || j.msg || 'без пояснення'));
+  if (!r.ok || !j.token_hash) throw new Error('функція входу відповіла ' + r.status + ': ' + (j.error || j.message || j.msg || j.code || 'без пояснення'));
   S.stage = 'session';
   const res = await sb.auth.verifyOtp({ token_hash: j.token_hash, type: 'magiclink' });
   if (res.error) throw new Error('не вдалося створити сесію: ' + res.error.message);
