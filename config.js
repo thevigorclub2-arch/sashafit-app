@@ -2,7 +2,7 @@
 // Усе тут публічне, секретних ключів у цьому файлі бути не повинно.
 window.SASHAFIT = {
   // Supabase: Project Settings -> API -> Project URL
-  SUPABASE_URL: "https://iqxlldcqnqsbttrvgyjk.supabase.co/rest/v1/",
+  SUPABASE_URL: "https://iqxlldcqnqsbttrvgyjk.supabase.co",
 
   // Supabase: Project Settings -> API -> публічний ключ (anon або publishable).
   // Ключ service_role / secret сюди НЕ вставляти.
