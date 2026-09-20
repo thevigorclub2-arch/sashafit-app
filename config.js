@@ -11,5 +11,5 @@ window.SASHAFIT = {
   // Посилання-запрошення для клієнтів: https://t.me/USERNAME_БОТА/КОРОТКА_НАЗВА?startapp=
   // КОРОТКА_НАЗВА задається в BotFather при створенні застосунку командою /newapp.
   // Код клієнта додається в кінець автоматично.
-  INVITE_BASE_URL: "https://t.me/afit_app_bot/myapp?startapp="
+  INVITE_BASE_URL: "https://t.me/afit_app_bot/app?startapp="
 };
