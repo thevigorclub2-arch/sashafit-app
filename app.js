@@ -991,8 +991,9 @@ document.addEventListener('change', async e => {
    ===================================================================== */
 async function realAuth() {
   // Функція входу зазвичай називається telegram-auth, але Supabase міг дати їй іншу назву (наприклад dynamic-task).
+  // Неіснуюча функція для браузера виглядає як помилка мережі, тому пробуємо наступну назву і при 404, і при збої запиту.
   const names = [CFG.AUTH_FUNCTION, 'telegram-auth', 'dynamic-task'].filter(Boolean);
-  let r = null, j = {};
+  let r = null, lastErr = null;
   for (let i = 0; i < names.length; i++) {
     try {
       r = await fetch(CFG.SUPABASE_URL + '/functions/v1/' + names[i], {
@@ -1000,10 +1001,12 @@ async function realAuth() {
         headers: { 'Content-Type': 'application/json', apikey: CFG.SUPABASE_ANON_KEY, Authorization: 'Bearer ' + CFG.SUPABASE_ANON_KEY },
         body: JSON.stringify({ initData: tg.initData })
       });
-    } catch (e) { throw new Error('немає звʼязку з функцією входу (' + (e && e.message ? e.message : e) + ')'); }
-    if (r.status !== 404) break;
+      lastErr = null;
+      if (r.status !== 404) break;
+    } catch (e) { lastErr = e; r = null; }
   }
-  j = await r.json().catch(() => ({}));
+  if (!r) throw new Error('немає звʼязку з функцією входу (' + (lastErr && lastErr.message ? lastErr.message : lastErr) + '). Перевірені назви: ' + names.join(', '));
+  const j = await r.json().catch(() => ({}));
   if (!r.ok || !j.token_hash) throw new Error('функція входу відповіла ' + r.status + ': ' + (j.error || j.message || j.msg || j.code || 'без пояснення'));
   S.stage = 'session';
   const res = await sb.auth.verifyOtp({ token_hash: j.token_hash, type: 'magiclink' });
