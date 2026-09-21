@@ -151,6 +151,7 @@
       in(c, a) { this.filters.push(r => a.indexOf(r[c]) !== -1); return this; }
       gte(c, v) { this.filters.push(r => r[c] >= v); return this; }
       lte(c, v) { this.filters.push(r => r[c] <= v); return this; }
+      is(c, v) { this.filters.push(r => (r[c] == null ? null : r[c]) === v); return this; }
       ilike(c, p) { const s = String(p).replace(/%/g, '').toLowerCase(); this.filters.push(r => String(r[c] || '').toLowerCase().indexOf(s) !== -1); return this; }
       order(c, o) { this.orders.push([c, !(o && o.ascending === false)]); return this; }
       limit(n) { this.lim = n; return this; }

@@ -64,7 +64,7 @@ const S = {
   // клієнт
   intake: null, sessions: [], checkins: [], program: null, workouts: [], items: [], exMap: {}, lastPerf: {},
   log: {}, logFor: null, finished: false, pf: null, pfEdit: false, editCi: false,
-  foodDate: todayISO(), entries: [], add: null, form: null, histOpen: {}, setLogs: {},
+  foodDate: todayISO(), entries: [], add: null, recents: [], offCache: {}, fd: null, form: null, histOpen: {}, setLogs: {},
   // тренер
   overview: [], remLog: [], settings: null, clients: [], exercises: [], programs: [],
   detailId: null, dtab: 'checkin', d: null, nc: null, newClient: null, exf: null, exq: '', exgf: '', pb: null, ind: '', urlCache: {}
@@ -284,12 +284,73 @@ async function saveIntake() {
 }
 
 /* ---------- харчування ---------- */
-function newAdd(meal) { return { meal: meal, q: '', results: [], food: null, grams: '', custom: false, cf: { n: '', k: '', p: '', f: '', c: '', g: '100' } }; }
+function newAdd(meal) { return { meal: meal, q: '', results: [], off: [], offBusy: false, offErr: '', food: null, grams: '', custom: false, cf: { n: '', k: '', p: '', f: '', c: '', g: '100' } }; }
 let searchTimer;
 async function searchFoods(q) {
   q = q.trim();
   if (q.length < 2) return [];
-  return await one(sb.from('foods').select('*').ilike('name', '%' + q + '%').limit(8));
+  const rows = await one(sb.from('foods').select('*').ilike('name', '%' + q + '%').limit(40));
+  const lq = q.toLowerCase();
+  const rank = f => { const n = f.name.toLowerCase(); return (n.indexOf(lq) === 0 ? 0 : n.split(/[\s,()]+/).some(w => w.indexOf(lq) === 0) ? 1 : 2) * 1000 + n.length; };
+  return rows.sort((a, b) => rank(a) - rank(b)).slice(0, 10);
+}
+// Недавні продукти: беремо з щоденника і повертаємо значення на 100 г
+async function loadRecents() {
+  const rows = await one(sb.from('food_entries').select('*').eq('client_id', S.me.id).order('created_at', { ascending: false }).limit(150));
+  const seen = {}, out = [];
+  rows.forEach(e => {
+    const k = String(e.food_name).toLowerCase(), g = Number(e.grams);
+    if (seen[k] || !(g > 0)) return;
+    seen[k] = 1;
+    out.push({ id: 'recent:' + out.length, name: e.food_name, kcal_100: r1(Number(e.kcal) / g * 100), protein_100: r1(Number(e.protein) / g * 100), fat_100: r1(Number(e.fat) / g * 100), carbs_100: r1(Number(e.carbs) / g * 100), default_g: r0(g), source: 'recent' });
+  });
+  S.recents = out.slice(0, 8);
+}
+// Open Food Facts: безкоштовна відкрита база продуктів зі штрихкодами
+const OFF_FIELDS = 'code,product_name,product_name_uk,brands,nutriments,serving_quantity';
+function offToFood(p) {
+  const n = p.nutriments || {};
+  let kcal = n['energy-kcal_100g'];
+  if ((kcal == null || isNaN(Number(kcal))) && n['energy_100g'] != null) kcal = Number(n['energy_100g']) / 4.184;
+  if (kcal == null || isNaN(Number(kcal))) return null;
+  const name = String(p.product_name_uk || p.product_name || '').trim();
+  if (!name) return null;
+  const brand = String(p.brands || '').split(',')[0].trim();
+  return { id: 'off:' + p.code, name: brand ? name + ' (' + brand + ')' : name, kcal_100: r1(Number(kcal)), protein_100: r1(Number(n.proteins_100g || 0)), fat_100: r1(Number(n.fat_100g || 0)), carbs_100: r1(Number(n.carbohydrates_100g || 0)), default_g: r0(num(p.serving_quantity)) || 100, source: 'openfoodfacts', external_id: p.code };
+}
+async function offSearch(q) {
+  const url = 'https://world.openfoodfacts.org/cgi/search.pl?search_terms=' + encodeURIComponent(q) + '&search_simple=1&action=process&json=1&page_size=12&fields=' + OFF_FIELDS;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('off ' + r.status);
+  const j = await r.json();
+  return (j.products || []).map(offToFood).filter(Boolean);
+}
+async function offBarcode(code) {
+  const r = await fetch('https://world.openfoodfacts.org/api/v2/product/' + encodeURIComponent(code) + '.json?fields=' + OFF_FIELDS);
+  if (!r.ok) throw new Error('off ' + r.status);
+  const j = await r.json();
+  if (j.status !== 1 || !j.product) return [];
+  const f = offToFood(Object.assign({ code: code }, j.product));
+  return f ? [f] : [];
+}
+let offTimer, lastOff = 0;
+// Запит до Open Food Facts: оновлює лише блок результатів, щоб не збивати введення тексту
+function doOff(kind, auto) {
+  const ad = S.add;
+  if (!ad || ad.offBusy) return;
+  const q = ad.q.trim(), key = kind + ':' + q;
+  if (auto && Date.now() - lastOff < 4000 && !S.offCache[key]) return; // не частіше, ніж дозволяє сервіс
+  ad.offBusy = true; ad.offErr = '';
+  const paint = () => { const r = document.getElementById('results'); if (r) r.innerHTML = resultsHTML(); };
+  paint();
+  (async () => {
+    try {
+      let res = S.offCache[key];
+      if (!res) { lastOff = Date.now(); res = kind === 'offbarcode' ? await offBarcode(q) : await offSearch(q); S.offCache[key] = res; }
+      if (ad.q.trim() === q) { ad.off = res; if (!res.length) ad.offErr = 'В Open Food Facts нічого не знайдено.'; }
+    } catch (err) { console.error(err); ad.offErr = 'Не вдалося звернутися до Open Food Facts. Спробуй пізніше або додай як «Свій продукт».'; }
+    ad.offBusy = false; if (S.add === ad) paint();
+  })();
 }
 const portion = (f, g) => ({ k: r1(Number(f.kcal_100) * g / 100), p: r1(Number(f.protein_100) * g / 100), f: r1(Number(f.fat_100) * g / 100), c: r1(Number(f.carbs_100) * g / 100) });
 async function addEntry(meal, food, g) {
@@ -398,12 +459,28 @@ function clientToday() {
     <button class="btn" data-act="finish" style="margin-top:12px">Завершити тренування</button>${hist}`;
 }
 
+function foodRow(f, tag) {
+  return `<button class="res" data-act="pickfood" data-fid="${esc(f.id)}"><span>${esc(f.name)}${f.owner_client_id ? ' <span class="chip plain">свій</span>' : ''}${tag ? ` <span class="chip plain">${tag}</span>` : ''}</span><span class="muted sm">${fmt(f.kcal_100)} ккал/100 г</span></button>`;
+}
 function resultsHTML() {
   const a = S.add;
   if (a.food) return `<div class="res" style="cursor:default"><span><b>${esc(a.food.name)}</b><br><span class="muted sm">на 100 г: ${fmt(a.food.kcal_100)} ккал · Б ${fmt(a.food.protein_100)} · Ж ${fmt(a.food.fat_100)} · В ${fmt(a.food.carbs_100)}</span></span><button class="btn sm alt" data-act="unpick">Змінити</button></div>`;
-  if (a.q.trim().length < 2) return '<p class="muted sm">Почни вводити назву продукту.</p>';
-  if (!a.results.length) return '<p class="muted sm">Нічого не знайдено. Додай як «Свій продукт».</p>';
-  return a.results.map(f => `<button class="res" data-act="pickfood" data-fid="${esc(f.id)}"><span>${esc(f.name)}${f.owner_client_id ? ' <span class="chip plain">свій</span>' : ''}</span><span class="muted sm">${fmt(f.kcal_100)} ккал/100 г</span></button>`).join('');
+  const q = a.q.trim();
+  if (q.length < 2) {
+    if (!S.recents.length) return '<p class="muted sm">Почни вводити назву продукту.</p>';
+    return '<p class="muted sm">Недавні продукти</p>' + S.recents.map(f => foodRow(f)).join('');
+  }
+  let html = a.results.length ? a.results.map(f => foodRow(f)).join('') : '<p class="muted sm">У базі нічого не знайдено.</p>';
+  html += a.off.map(f => foodRow(f, 'Open Food Facts')).join('');
+  if (a.offBusy) html += '<p class="muted sm" style="margin-top:8px">Шукаю в Open Food Facts…</p>';
+  else {
+    if (a.offErr) html += `<p class="muted sm" style="margin-top:8px">${esc(a.offErr)}</p>`;
+    if (!a.off.length) html += /^\d{8,14}$/.test(q)
+      ? '<button class="btn sm alt" style="margin-top:8px" data-act="offbarcode">Знайти за штрихкодом</button>'
+      : '<button class="btn sm alt" style="margin-top:8px" data-act="offsearch">Шукати ще в Open Food Facts</button>';
+  }
+  if (a.off.length) html += '<p class="muted sm" style="margin-top:8px">Дані: Open Food Facts (ODbL). Значення вносять користувачі, перевір їх на упаковці.</p>';
+  return html;
 }
 function pvalsHTML() {
   const a = S.add; if (!a.food) return '';
@@ -564,13 +641,14 @@ function attentionList() {
   return L.sort((a, b) => ord[a.k] - ord[b.k]);
 }
 function coachHTML() {
-  const tabs = [['overview', 'Огляд', 'today'], ['clients', 'Клієнти', 'user'], ['exercises', 'Вправи', 'dumb'], ['programs', 'Програми', 'list']];
+  const tabs = [['overview', 'Огляд', 'today'], ['clients', 'Клієнти', 'user'], ['exercises', 'Вправи', 'dumb'], ['programs', 'Програми', 'list'], ['foods', 'Продукти', 'food']];
   let body;
   if (S.ctab === 'overview') body = overviewHTML();
   else if (S.ctab === 'clients') body = S.detailId && S.d ? detailHTML() : clientsListHTML();
   else if (S.ctab === 'exercises') body = exercisesHTML();
+  else if (S.ctab === 'foods') body = foodsHTML();
   else body = S.pb ? builderHTML() : programsListHTML();
-  return `<div class="wrap"><div class="ph-head"><div class="muted sm">${esc(fmtDateLong(todayISO()))}</div><h1 class="c-title">${{ overview: 'Огляд', clients: 'Клієнти', exercises: 'Вправи', programs: 'Програми' }[S.ctab]}</h1></div>
+  return `<div class="wrap"><div class="ph-head"><div class="muted sm">${esc(fmtDateLong(todayISO()))}</div><h1 class="c-title">${{ overview: 'Огляд', clients: 'Клієнти', exercises: 'Вправи', programs: 'Програми', foods: 'Продукти' }[S.ctab]}</h1></div>
     <div class="ph-body">${body}</div></div>
     <div class="tabbar"><nav class="tabs" aria-label="Розділи">${tabs.map(t => `<button data-act="ctab" data-tab="${t[0]}"${S.ctab === t[0] ? ' aria-current="page"' : ''}>${icon(t[2])}${t[1]}</button>`).join('')}</nav></div>`;
 }
@@ -673,6 +751,35 @@ function dSub() {
     <label class="unit"><input type="text" inputmode="decimal" data-in="pay_amount" value="${esc(S.payAmount || '')}" placeholder="Сума" aria-label="Сума"><span>грн</span></label></div>
     <button class="btn" style="margin-top:10px" data-act="pay">Позначити оплату</button></div>
     <div class="sec"><h3>Історія оплат</h3>${pays || '<p class="muted sm">Оплат поки немає.</p>'}</div>`;
+}
+
+/* ---------- тренер: база продуктів ---------- */
+const newFd = () => ({ q: '', list: [], f: { id: null, name: '', k: '', p: '', f: '', c: '', g: '100' } });
+let fdTimer;
+async function loadFoodsAdmin() {
+  const q = S.fd.q.trim();
+  let req = sb.from('foods').select('*').is('owner_client_id', null);
+  if (q.length >= 2) req = req.ilike('name', '%' + q + '%');
+  S.fd.list = await one(req.order('name', { ascending: true }).limit(60));
+}
+function foodListHTML() {
+  const l = S.fd.list;
+  if (!l.length) return '<p class="muted sm" style="margin-top:12px">Нічого не знайдено.</p>';
+  return l.map(f => `<div class="exrow"><div class="grow"><b>${esc(f.name)}</b><div class="muted sm">${fmt(f.kcal_100)} ккал · Б ${fmt(f.protein_100)} · Ж ${fmt(f.fat_100)} · В ${fmt(f.carbs_100)} на 100 г</div></div>
+    <button class="btn sm alt" data-act="fdedit" data-id="${f.id}">Змінити</button><button class="x" data-act="fddel" data-id="${f.id}" aria-label="Видалити ${esc(f.name)}">×</button></div>`).join('')
+    + (l.length >= 60 ? '<p class="muted sm" style="margin-top:10px">Показано перші 60. Використовуй пошук.</p>' : '');
+}
+function foodsHTML() {
+  if (!S.fd) S.fd = newFd();
+  const f = S.fd.f;
+  const fi = (k, l, u) => `<label class="unit"><input type="text" inputmode="decimal" data-in="fd_${k}" value="${esc(f[k])}" placeholder="${l}" aria-label="${l}"><span>${u}</span></label>`;
+  return `<div class="card" style="margin-top:0"><h2>${f.id ? 'Змінити продукт' : 'Новий продукт'}</h2>
+    <label class="field"><span>Назва</span><input type="text" data-in="fd_name" value="${esc(f.name)}" placeholder="Наприклад: Гречка, варена"></label>
+    <span class="lbl">Поживність на 100 г</span><div class="grid2">${fi('k', 'Калорії', 'ккал')}${fi('p', 'Білки', 'г')}${fi('f', 'Жири', 'г')}${fi('c', 'Вуглеводи', 'г')}</div>
+    <span class="lbl">Стандартна порція</span>${fi('g', 'Порція', 'г')}
+    <div class="inline" style="margin-top:12px"><button class="btn" style="flex:1" data-act="fdsave">${f.id ? 'Зберегти' : 'Додати продукт'}</button>${f.id ? '<button class="ghost" data-act="fdcancel">Скасувати</button>' : ''}</div></div>
+    <div class="card"><h2>Спільна база продуктів</h2><p class="muted sm">Її бачать усі клієнти при пошуку. Значення на 100 г.</p>
+    <input type="search" style="margin-top:8px" data-in="fdq" value="${esc(S.fd.q)}" placeholder="Пошук продукту" aria-label="Пошук продукту"><div id="fdlist">${foodListHTML()}</div></div>`;
 }
 
 function exercisesHTML() {
@@ -804,10 +911,11 @@ document.addEventListener('click', e => {
     case 'pf': S.pf[ds.f] = ds.v; hap(); render(); break;
     case 'pfedit': S.pfEdit = true; S.pf = pfFromIntake(S.intake); render(); break;
     case 'pfsave': run(saveIntake); break;
-    case 'addopen': S.add = newAdd(ds.m); render(); break;
+    case 'addopen': S.add = newAdd(ds.m); render(); run(loadRecents); break;
     case 'addclose': S.add = null; render(); break;
     case 'addmode': S.add.custom = ds.v === 'custom'; render(); break;
-    case 'pickfood': { const f = S.add.results.find(x => x.id === ds.fid); if (f) { S.add.food = f; S.add.grams = String(f.default_g); } render(); break; }
+    case 'pickfood': { const f = S.add.results.concat(S.add.off, S.recents).find(x => x.id === ds.fid); if (f) { S.add.food = f; S.add.grams = String(f.default_g); } render(); break; }
+    case 'offsearch': case 'offbarcode': doOff(a, false); break;
     case 'unpick': S.add.food = null; S.add.grams = ''; render(); break;
     case 'addfood': {
       const ad = S.add, g = num(ad.grams);
@@ -829,7 +937,7 @@ document.addEventListener('click', e => {
     case 'editci': S.editCi = true; S.form = newForm(); render(); break;
     case 'submit': run(submitCheckin); break;
     /* --- тренер --- */
-    case 'ctab': run(async () => { S.ctab = ds.tab; S.pb = null; S.detailId = null; S.d = null; if (S.ctab === 'overview' || S.ctab === 'clients') await reloadCoachLists(); }); if (typeof window.scrollTo === 'function') window.scrollTo(0, 0); break;
+    case 'ctab': run(async () => { S.ctab = ds.tab; S.pb = null; S.detailId = null; S.d = null; if (S.ctab === 'overview' || S.ctab === 'clients') await reloadCoachLists(); if (S.ctab === 'foods') { if (!S.fd) S.fd = newFd(); await loadFoodsAdmin(); } }); if (typeof window.scrollTo === 'function') window.scrollTo(0, 0); break;
     case 'remind': run(async () => { await remind(id, ds.kind); hap('success'); }, 'Нагадування збережено'); break;
     case 'open': run(async () => { S.ctab = 'clients'; await openClient(id, ds.tab || 'checkin'); }); if (typeof window.scrollTo === 'function') window.scrollTo(0, 0); break;
     case 'sel': run(async () => { await openClient(id, S.dtab || 'checkin'); }); if (typeof window.scrollTo === 'function') window.scrollTo(0, 0); break;
@@ -885,6 +993,25 @@ document.addEventListener('click', e => {
       await one(sb.from('clients').update({ sub_end: newEnd, sub_start: c.sub_start || todayISO() }).eq('id', c.id));
       S.payMonths = '1'; S.payAmount = ''; await refreshDetail(); hap('success'); toast('Оплату відмічено. Підписка до ' + fmtDate(newEnd));
     }); break;
+    /* --- продукти --- */
+    case 'fdsave': {
+      const f = S.fd.f;
+      if (!f.name.trim()) { toast('Вкажи назву продукту'); break; }
+      if (f.k === '' || num(f.k) < 0) { toast('Вкажи калорії на 100 г'); break; }
+      run(async () => {
+        const row = { name: f.name.trim(), kcal_100: num(f.k), protein_100: num(f.p), fat_100: num(f.f), carbs_100: num(f.c), default_g: r0(num(f.g)) || 100 };
+        if (f.id) await one(sb.from('foods').update(row).eq('id', f.id));
+        else await one(sb.from('foods').insert(Object.assign({ source: 'coach', owner_client_id: null }, row)));
+        S.fd.f = newFd().f; await loadFoodsAdmin(); hap('success');
+      }, f.id ? 'Збережено' : 'Продукт додано'); break;
+    }
+    case 'fdedit': { const x = S.fd.list.find(v => v.id === id); if (x) S.fd.f = { id: x.id, name: x.name, k: String(x.kcal_100), p: String(x.protein_100), f: String(x.fat_100), c: String(x.carbs_100), g: String(x.default_g) }; render(); if (typeof window.scrollTo === 'function') window.scrollTo(0, 0); break; }
+    case 'fdcancel': S.fd.f = newFd().f; render(); break;
+    case 'fddel': {
+      const x = S.fd.list.find(v => v.id === id); if (!x) break;
+      if (typeof confirm === 'function' && !confirm('Видалити «' + x.name + '» зі спільної бази?')) break;
+      run(async () => { await one(sb.from('foods').delete().eq('id', id)); await loadFoodsAdmin(); }, 'Продукт видалено'); break;
+    }
     /* --- вправи --- */
     case 'exsave': {
       const f = S.exf;
@@ -945,10 +1072,13 @@ document.addEventListener('input', e => {
   else if (f === 'comment') { S.form.comment = t.value; S.form.touched = true; }
   else if (f.indexOf('pf_') === 0) S.pf[f.slice(3)] = t.value;
   else if (f === 'q') {
-    S.add.q = t.value; clearTimeout(searchTimer);
+    S.add.q = t.value; S.add.off = []; S.add.offErr = ''; clearTimeout(searchTimer); clearTimeout(offTimer);
     searchTimer = setTimeout(async () => {
       try { S.add.results = await searchFoods(S.add.q); } catch (err) { S.add.results = []; }
       const r = document.getElementById('results'); if (r) r.innerHTML = resultsHTML();
+      // Якщо у своїй базі майже нічого немає, автоматично шукаємо в Open Food Facts
+      const q = S.add.q.trim(); clearTimeout(offTimer);
+      if (S.add.results.length < 3 && q.length >= 3 && !/^\d{8,14}$/.test(q)) offTimer = setTimeout(() => { if (S.add && !S.add.food && S.add.q.trim() === q && !S.add.off.length) doOff('offsearch', true); }, 500);
     }, 250);
     const r = document.getElementById('results'); if (r && S.add.q.trim().length < 2) r.innerHTML = resultsHTML();
   }
@@ -961,6 +1091,11 @@ document.addEventListener('input', e => {
   else if (f === 'sub_tariff' || f === 'sub_start' || f === 'sub_end') { const c = S.d.c; if (!S.d.sub) S.d.sub = { tariff: c.tariff || '', sub_start: c.sub_start || '', sub_end: c.sub_end || '' }; S.d.sub[f === 'sub_tariff' ? 'tariff' : f] = t.value; }
   else if (f === 'pay_months') S.payMonths = t.value;
   else if (f === 'pay_amount') S.payAmount = t.value;
+  else if (f.indexOf('fd_') === 0) S.fd.f[f.slice(3)] = t.value;
+  else if (f === 'fdq') {
+    S.fd.q = t.value; clearTimeout(fdTimer);
+    fdTimer = setTimeout(async () => { try { await loadFoodsAdmin(); } catch (err) { console.error(err); } const l = document.getElementById('fdlist'); if (l) l.innerHTML = foodListHTML(); }, 300);
+  }
   else if (f === 'exn') S.exf.name = t.value;
   else if (f === 'exg') S.exf.group = t.value;
   else if (f === 'exv') S.exf.video = t.value;
