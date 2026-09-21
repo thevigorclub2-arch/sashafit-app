@@ -64,7 +64,7 @@ const S = {
   // клієнт
   intake: null, sessions: [], checkins: [], program: null, workouts: [], items: [], exMap: {}, lastPerf: {},
   log: {}, logFor: null, finished: false, pf: null, pfEdit: false, editCi: false,
-  foodDate: todayISO(), entries: [], add: null, recents: [], offCache: {}, fd: null, weekEntries: [], sl: null, slPick: '', form: null, histOpen: {}, setLogs: {},
+  foodDate: todayISO(), entries: [], add: null, recents: [], offCache: {}, fd: null, zoom: '', weekEntries: [], sl: null, slPick: '', form: null, histOpen: {}, setLogs: {},
   // тренер
   overview: [], remLog: [], settings: null, clients: [], exercises: [], programs: [],
   detailId: null, dtab: 'checkin', d: null, nc: null, newClient: null, exf: null, exq: '', exgf: '', pb: null, ind: '', urlCache: {}
@@ -430,22 +430,38 @@ async function addEntry(meal, food, g) {
 }
 
 /* ---------- check-in ---------- */
-function compress(file) {
+function compress(file, max, kb) {
+  max = max || 1280; kb = kb || 900;
   return new Promise((res, rej) => {
     const img = new Image(), url = URL.createObjectURL(file);
     img.onload = () => {
-      const max = 1280; let w = img.width, h = img.height; const sc = Math.min(1, max / Math.max(w, h));
+      let w = img.width, h = img.height; const sc = Math.min(1, max / Math.max(w, h));
       w = Math.round(w * sc); h = Math.round(h * sc);
       const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
-      cv.getContext('2d').drawImage(img, 0, 0, w, h); URL.revokeObjectURL(url);
-      let q = 0.72;
-      const tryQ = () => cv.toBlob(b => { if (!b) return rej(new Error('compress')); if (b.size > 900 * 1024 && q > 0.3) { q -= 0.1; return tryQ(); } res(b); }, 'image/jpeg', q);
+      const ctx = cv.getContext('2d');
+      if (ctx.fillRect) { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h); }
+      ctx.drawImage(img, 0, 0, w, h); URL.revokeObjectURL(url);
+      let q = 0.8;
+      const tryQ = () => cv.toBlob(b => { if (!b) return rej(new Error('compress')); if (b.size > kb * 1024 && q > 0.3) { q -= 0.1; return tryQ(); } res(b); }, 'image/jpeg', q);
       tryQ();
     };
     img.onerror = () => rej(new Error('image'));
     img.src = url;
   });
 }
+// Зображення вправ: GIF залишаємо як є (щоб працювала анімація), решту стискаємо
+async function prepareExImage(file) {
+  if (file.type === 'image/gif') {
+    if (file.size > 3 * 1024 * 1024) throw new Error('gif_big');
+    return { blob: file, type: 'image/gif', ext: 'gif', url: URL.createObjectURL(file) };
+  }
+  const blob = await compress(file, 900, 450);
+  return { blob: blob, type: 'image/jpeg', ext: 'jpg', url: URL.createObjectURL(blob) };
+}
+const EX_BUCKET = 'exercise-images';
+const imgUrl = path => { try { return sb.storage.from(EX_BUCKET).getPublicUrl(path).data.publicUrl; } catch (e) { return ''; } };
+async function removeExImage(path) { try { await sb.storage.from(EX_BUCKET).remove([path]); } catch (e) { /* не критично */ } }
+const newExf = group => ({ id: null, name: '', group: group || 'Ноги', video: '', note: '', image_path: null, newImg: null, removeImg: false });
 async function submitCheckin() {
   const f = S.form, w = num(f.w);
   if (!(w >= 30 && w <= 250)) { toast('Вкажи вагу, наприклад 70,5'); return; }
@@ -519,8 +535,9 @@ function clientToday() {
     const e = S.exMap[it.exercise_id], meta = [];
     if (S.lastPerf[it.exercise_id]) meta.push('Минулого разу: ' + esc(S.lastPerf[it.exercise_id]));
     if (e && e.note) meta.push(esc(e.note));
-    return `<section class="ex"><div class="inline between"><h3>${esc(exName(it.exercise_id))}</h3>${e && isUrl(e.video_url) ? `<a class="sm" href="${esc(e.video_url)}" target="_blank" rel="noopener">Відео</a>` : ''}</div>
-      ${meta.length ? `<div class="muted sm">${meta.join(' · ')}</div>` : ''}${rows}</section>`;
+    const thumb = e && e.image_path ? `<img class="exthumb" src="${esc(imgUrl(e.image_path))}" alt="${esc(exName(it.exercise_id))}" loading="lazy" data-act="zoom" data-src="${esc(imgUrl(e.image_path))}">` : '';
+    return `<section class="ex"><div class="exhead">${thumb}<div class="grow"><div class="inline between"><h3>${esc(exName(it.exercise_id))}</h3>${e && isUrl(e.video_url) ? `<a class="sm" href="${esc(e.video_url)}" target="_blank" rel="noopener">Відео</a>` : ''}</div>
+      ${meta.length ? `<div class="muted sm">${meta.join(' · ')}</div>` : ''}</div></div>${rows}</section>`;
   }).join('');
   const segs = Array.from({ length: total }, (_, k) => `<i class="${k < done ? 'on' : ''}"></i>`).join('');
   const saved = S.finished ? '<div class="callout"><b>Тренування збережено в щоденнику.</b> Нижче наступне за програмою.</div>' : '';
@@ -667,7 +684,7 @@ async function loadCoach() {
     one(sb.from('reminders_log').select('*').gte('sent_at', midnight.toISOString()))
   ]);
   S.overview = ov; S.clients = clients; S.settings = settings; S.exercises = ex; S.programs = progs; S.remLog = rem;
-  if (!S.exf) S.exf = { id: null, name: '', group: 'Ноги', video: '', note: '' };
+  if (!S.exf) S.exf = newExf();
 }
 async function reloadCoachLists() {
   const [ov, clients] = await Promise.all([one(sb.from('client_overview').select('*')), one(sb.from('clients').select('*').order('name', { ascending: true }))]);
@@ -864,7 +881,7 @@ function exercisesHTML() {
   const groups = GROUPS.map(g => {
     const list = filtered.filter(e => e.muscle_group === g);
     if (!list.length) return '';
-    return `<div class="sec"><h3>${g} <span class="muted sm">${list.length}</span></h3>${list.map(e => `<div class="exrow"><div class="grow"><b>${esc(e.name)}</b>${e.note ? `<div class="muted sm">${esc(e.note)}</div>` : ''}${isUrl(e.video_url) ? `<a class="sm" href="${esc(e.video_url)}" target="_blank" rel="noopener">Відео</a>` : ''}</div>
+    return `<div class="sec"><h3>${g} <span class="muted sm">${list.length}</span></h3>${list.map(e => `<div class="exrow">${e.image_path ? `<img class="exthumb s" src="${esc(imgUrl(e.image_path))}" alt="" loading="lazy" data-act="zoom" data-src="${esc(imgUrl(e.image_path))}">` : ''}<div class="grow"><b>${esc(e.name)}</b>${e.note ? `<div class="muted sm">${esc(e.note)}</div>` : ''}${isUrl(e.video_url) ? `<a class="sm" href="${esc(e.video_url)}" target="_blank" rel="noopener">Відео</a>` : ''}</div>
       <button class="btn sm alt" data-act="exedit" data-id="${e.id}">Змінити</button><button class="x" data-act="exdel" data-id="${e.id}" aria-label="Видалити ${esc(e.name)}">×</button></div>`).join('')}</div>`;
   }).join('');
   return `<div class="card" style="margin-top:0"><h2>${f.id ? 'Змінити вправу' : 'Нова вправа'}</h2>
@@ -872,6 +889,10 @@ function exercisesHTML() {
     <label class="field"><span>Група м’язів</span><select data-in="exg">${GROUPS.map(g => `<option${f.group === g ? ' selected' : ''}>${g}</option>`).join('')}</select></label>
     <label class="field"><span>Посилання на відео</span><input type="text" data-in="exv" value="${esc(f.video)}" placeholder="https://… (необов’язково)"></label>
     <label class="field"><span>Підказка для клієнта</span><input type="text" data-in="exnote" value="${esc(f.note)}" placeholder="Техніка, темп, дихання"></label>
+    <span class="lbl">Фото або GIF (необов’язково)</span>
+    <div class="inline">${(f.newImg || (f.image_path && !f.removeImg)) ? `<img class="exthumb" src="${esc(f.newImg ? f.newImg.url : imgUrl(f.image_path))}" alt="Попередній перегляд">` : ''}
+    <button class="btn sm alt" data-act="expick">${(f.newImg || (f.image_path && !f.removeImg)) ? 'Замінити' : 'Вибрати файл'}</button>${(f.newImg || (f.image_path && !f.removeImg)) ? '<button class="ghost" data-act="exclear">Прибрати</button>' : ''}</div>
+    <input type="file" accept="image/*" hidden id="exfile" data-in="exphoto"><div class="muted sm" style="margin-top:6px">Фото стискається автоматично. GIF до 3 МБ.</div>
     <div class="inline" style="margin-top:12px"><button class="btn" style="flex:1" data-act="exsave">${f.id ? 'Зберегти' : 'Додати вправу'}</button>${f.id ? '<button class="ghost" data-act="excancel">Скасувати</button>' : ''}</div></div>
     <div class="card"><h2>Бібліотека вправ</h2><input type="search" style="margin-top:8px" data-in="exq" value="${esc(S.exq)}" placeholder="Пошук вправи" aria-label="Пошук вправи">
     <div class="opts" style="margin-top:10px"><button data-act="exgf" data-g="" aria-pressed="${!S.exgf}">Усі</button>${GROUPS.map(g => `<button data-act="exgf" data-g="${g}" aria-pressed="${S.exgf === g}">${g}</button>`).join('')}</div>
@@ -941,7 +962,7 @@ function render(top) {
   else if (S.mode === 'nottg') html = box(`<h1>SashaFit</h1><p class="muted">Відкрий застосунок через Telegram-бота свого тренера.</p><p style="margin-top:14px"><a href="?demo=client">Переглянути демо</a></p>`);
   else if (S.mode === 'noinvite') html = box(`<h1>Потрібне запрошення</h1><p class="muted">${esc(S.err || 'Попроси в тренера персональне посилання-запрошення.')}</p>`);
   else if (S.mode === 'error') { const em = S.err ? (S.err.message || S.err.code || String(S.err)) : ''; html = box(`<h1>Не вдалося відкрити</h1><p class="muted">Перевір інтернет і спробуй ще раз.</p><p class="muted sm" style="margin-top:12px;word-break:break-word">Деталі (покажи тренеру або розробнику): ${esc(S.stage || '')} · ${esc(em)}${S.err && S.err.code ? ' [' + esc(S.err.code) + ']' : ''}</p><button class="btn" style="margin-top:14px" data-act="retry">Спробувати ще</button>`); }
-  else html = (DEMO ? '<div class="demo">Демо-режим · <a href="?demo=client">Клієнт</a> · <a href="?demo=coach">Тренер</a></div>' : '') + (S.role === 'coach' ? coachHTML() : clientHTML());
+  else html = (DEMO ? '<div class="demo">Демо-режим · <a href="?demo=client">Клієнт</a> · <a href="?demo=coach">Тренер</a></div>' : '') + (S.role === 'coach' ? coachHTML() : clientHTML()) + (S.zoom ? `<div class="lightbox" data-act="unzoom" role="dialog" aria-label="Збільшене зображення"><img src="${esc(S.zoom)}" alt=""></div>` : '');
   app.innerHTML = html;
   hydrateImages(); syncBack();
   if (top && typeof window.scrollTo === 'function') window.scrollTo(0, 0);
@@ -1099,14 +1120,27 @@ document.addEventListener('click', e => {
       if (!f.name.trim()) { toast('Вкажи назву вправи'); break; }
       if (f.video.trim() && !isUrl(f.video.trim())) { toast('Посилання має починатися з http:// або https://'); break; }
       run(async () => {
-        const row = { name: f.name.trim(), muscle_group: f.group, video_url: f.video.trim() || null, note: f.note.trim() || null };
+        let imagePath = f.image_path || null;
+        if (f.removeImg && imagePath) { await removeExImage(imagePath); imagePath = null; }
+        if (f.newImg) {
+          const path = 'ex-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8) + '.' + f.newImg.ext;
+          const up = await sb.storage.from(EX_BUCKET).upload(path, f.newImg.blob, { contentType: f.newImg.type, upsert: false });
+          if (up.error) throw up.error;
+          if (imagePath) await removeExImage(imagePath);
+          imagePath = path;
+        }
+        const row = { name: f.name.trim(), muscle_group: f.group, video_url: f.video.trim() || null, note: f.note.trim() || null, image_path: imagePath };
         if (f.id) await one(sb.from('exercises').update(row).eq('id', f.id)); else await one(sb.from('exercises').insert(row));
         S.exercises = await one(sb.from('exercises').select('*').order('name', { ascending: true }));
-        S.exf = { id: null, name: '', group: f.group, video: '', note: '' }; hap('success');
+        S.exf = newExf(f.group); hap('success');
       }, f.id ? 'Збережено' : 'Вправу додано'); break;
     }
-    case 'exedit': { const x = S.exercises.find(v => v.id === id); if (x) S.exf = { id: x.id, name: x.name, group: x.muscle_group, video: x.video_url || '', note: x.note || '' }; render(); if (typeof window.scrollTo === 'function') window.scrollTo(0, 0); break; }
-    case 'excancel': S.exf = { id: null, name: '', group: 'Ноги', video: '', note: '' }; render(); break;
+    case 'exedit': { const x = S.exercises.find(v => v.id === id); if (x) S.exf = { id: x.id, name: x.name, group: x.muscle_group, video: x.video_url || '', note: x.note || '', image_path: x.image_path || null, newImg: null, removeImg: false }; render(); if (typeof window.scrollTo === 'function') window.scrollTo(0, 0); break; }
+    case 'excancel': S.exf = newExf(); render(); break;
+    case 'expick': { const el = document.getElementById('exfile'); if (el) el.click(); break; }
+    case 'exclear': S.exf.newImg = null; if (S.exf.image_path) S.exf.removeImg = true; render(); break;
+    case 'zoom': S.zoom = ds.src; render(); break;
+    case 'unzoom': S.zoom = ''; render(); break;
     case 'exdel': {
       const x = S.exercises.find(v => v.id === id);
       if (!x) break;
@@ -1199,6 +1233,13 @@ document.addEventListener('input', e => {
 
 document.addEventListener('change', async e => {
   const t = e.target;
+  if (t.dataset && t.dataset.in === 'exphoto') {
+    const file = t.files && t.files[0];
+    if (!file) return;
+    try { S.exf.newImg = await prepareExImage(file); S.exf.removeImg = false; render(); }
+    catch (err) { toast(err && err.message === 'gif_big' ? 'GIF завеликий, максимум 3 МБ' : 'Не вдалося обробити зображення'); }
+    return;
+  }
   if (t.dataset && t.dataset.in === 'photo') {
     const i = +t.dataset.i, file = t.files && t.files[0];
     if (!file) return;

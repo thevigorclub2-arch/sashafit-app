@@ -56,7 +56,7 @@
       coach_settings: [{ id: true, remind_checkin: true, remind_pay: true, remind_workout: false, checkin_weekday: 7, checkin_hour: 10 }],
       reminders_log: [] };
     const now = new Date().toISOString();
-    EX.forEach(e => T.exercises.push({ id: e[0], name: e[1], muscle_group: e[2], video_url: null, note: e[3] || null, created_at: now }));
+    EX.forEach(e => T.exercises.push({ id: e[0], name: e[1], muscle_group: e[2], video_url: null, note: e[3] || null, image_path: ['e1', 'e2', 'e3', 'e4'].indexOf(e[0]) !== -1 ? 'demo/' + e[0] + '.svg' : null, created_at: now }));
     PROGS.forEach(p => {
       T.programs.push({ id: p[0], name: p[1], created_at: now });
       p[2].forEach((w, wi) => {
@@ -209,15 +209,18 @@
         return { data: null, error: { message: 'unsupported' } };
       }
     }
+    const files = {};
     const svg = label => 'data:image/svg+xml;utf8,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="300" height="400"><rect width="300" height="400" fill="#D7EEEA"/><text x="150" y="205" font-size="18" text-anchor="middle" fill="#0F766E" font-family="sans-serif">' + label + '</text></svg>');
     return {
       __demo: true,
       __meId: 'c1',
       from: t => new Q(t),
       rpc: async () => ({ data: 'c1', error: null }),
-      storage: { from: () => ({
-        upload: async p => ({ data: { path: p }, error: null }),
-        createSignedUrl: async () => ({ data: { signedUrl: svg('фото') }, error: null })
+      storage: { from: bucket => ({
+        upload: async (p, blob) => { try { files[p] = URL.createObjectURL(blob); } catch (e) { /* ігноруємо */ } return { data: { path: p }, error: null }; },
+        remove: async ps => { ps.forEach(x => { delete files[x]; }); return { data: null, error: null }; },
+        createSignedUrl: async () => ({ data: { signedUrl: svg('фото') }, error: null }),
+        getPublicUrl: p => ({ data: { publicUrl: files[p] || svg(bucket === 'exercise-images' ? 'вправа' : 'фото') } })
       }) }
     };
   }
