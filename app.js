@@ -64,7 +64,7 @@ const S = {
   // клієнт
   intake: null, sessions: [], checkins: [], program: null, workouts: [], items: [], exMap: {}, lastPerf: {},
   log: {}, logFor: null, finished: false, pf: null, pfEdit: false, editCi: false,
-  foodDate: todayISO(), entries: [], add: null, recents: [], offCache: {}, fd: null, form: null, histOpen: {}, setLogs: {},
+  foodDate: todayISO(), entries: [], add: null, recents: [], offCache: {}, fd: null, weekEntries: [], sl: null, slPick: '', form: null, histOpen: {}, setLogs: {},
   // тренер
   overview: [], remLog: [], settings: null, clients: [], exercises: [], programs: [],
   detailId: null, dtab: 'checkin', d: null, nc: null, newClient: null, exf: null, exq: '', exgf: '', pb: null, ind: '', urlCache: {}
@@ -143,21 +143,82 @@ function totalsOf(entries) {
   entries.forEach(e => { t.k += Number(e.kcal); t.p += Number(e.protein); t.f += Number(e.fat); t.c += Number(e.carbs); });
   return t;
 }
-function analyticsHTML(checkins, sessions) {
+// Сила по вправах: найкращий підхід за кожне тренування
+async function loadStrength(clientId, sessions) {
+  const dates = {}; sessions.forEach(x => { dates[x.id] = x.performed_on; });
+  if (!sessions.length) return { names: [], by: {} };
+  const logs = await one(sb.from('set_logs').select('*').eq('client_id', clientId).limit(4000));
+  const by = {};
+  logs.forEach(l => {
+    if (!l.done) return;
+    const d = dates[l.session_id]; if (!d) return;
+    const n = l.exercise_name; by[n] = by[n] || {};
+    const kg = Number(l.weight_kg), rp = Number(l.reps), cur = by[n][d];
+    if (!cur || kg > cur.kg || (kg === cur.kg && rp > cur.rp)) by[n][d] = { kg: kg, rp: rp };
+  });
+  const out = {};
+  Object.keys(by).forEach(n => { out[n] = Object.keys(by[n]).sort().map(d => ({ d: d, kg: by[n][d].kg, rp: by[n][d].rp })); });
+  const names = Object.keys(out).sort((a, b) => out[b].length - out[a].length || a.localeCompare(b));
+  return { names: names, by: out };
+}
+function strengthBoxHTML(sl, pick) {
+  if (!sl || !sl.names.length) return '<p class="muted sm">Поки немає виконаних підходів.</p>';
+  const name = sl.by[pick] ? pick : sl.names[0], pts = sl.by[name];
+  const useKg = pts.some(p => p.kg > 0);
+  const vals = pts.map(p => (useKg ? p.kg : p.rp));
+  const unit = useKg ? 'кг' : 'повторень';
+  const sum = vals.length >= 2 ? `${fmt(vals[0])} → ${fmt(vals[vals.length - 1])} ${unit} (${sgn(vals[vals.length - 1] - vals[0])})` : 'Поки один запис: ' + fmt(vals[0]) + ' ' + unit;
+  return `<div class="muted sm">Найкращий підхід за тренування, ${unit}</div>${chart(vals, 340, 150, 'Графік прогресу у вправі ' + name)}<div class="muted sm" style="margin-top:4px">${sum}</div>`;
+}
+// Харчування за 7 днів: калорії по днях відносно норми
+function weekHTML(entries, N) {
+  const days = []; for (let i = 6; i >= 0; i--) days.push(addDaysISO(todayISO(), -i));
+  const by = {};
+  entries.forEach(e => { const b = by[e.eaten_on] = by[e.eaten_on] || { k: 0, p: 0 }; b.k += Number(e.kcal); b.p += Number(e.protein); });
+  const logged = days.filter(d => by[d]);
+  if (!logged.length) return '<p class="muted sm">За останні 7 днів записів про їжу немає.</p>';
+  const avgK = logged.reduce((x, d) => x + by[d].k, 0) / logged.length, avgP = logged.reduce((x, d) => x + by[d].p, 0) / logged.length;
+  const inNorm = logged.filter(d => Math.abs(by[d].k - N.kcal) <= N.kcal * 0.1).length;
+  const w = 340, h = 170, pad2 = 24, max = Math.max.apply(null, [N.kcal * 1.25].concat(days.map(d => (by[d] ? by[d].k : 0))));
+  const bw = (w - 2 * pad2) / 7, yv = v => h - pad2 - (h - 2 * pad2 - 14) * v / max;
+  const bars2 = days.map((d, i) => {
+    const k = by[d] ? by[d].k : 0, x = pad2 + i * bw + bw * 0.18;
+    const wd = parseISO(d).toLocaleDateString('uk-UA', { weekday: 'short' });
+    const color = !k ? 'var(--line)' : k > N.kcal * 1.1 ? 'var(--bad)' : 'var(--accent)';
+    const op = !k ? 0.6 : k < N.kcal * 0.9 ? 0.45 : 1;
+    return (k ? `<rect x="${x.toFixed(1)}" y="${yv(k).toFixed(1)}" width="${(bw * 0.64).toFixed(1)}" height="${(h - pad2 - yv(k)).toFixed(1)}" rx="4" fill="${color}" fill-opacity="${op}"/><text x="${(x + bw * 0.32).toFixed(1)}" y="${(yv(k) - 5).toFixed(1)}" font-size="10" text-anchor="middle">${r0(k)}</text>` : '')
+      + `<text x="${(x + bw * 0.32).toFixed(1)}" y="${h - 6}" font-size="11" text-anchor="middle">${wd}</text>`;
+  }).join('');
+  return `<div class="tiles"><div class="stat"><b>${r0(avgK)}</b><span>ккал у середньому</span></div><div class="stat"><b>${inNorm}/${logged.length}</b><span>днів у межах ±10% норми</span></div>
+    <div class="stat"><b>${r0(avgP)}</b><span>білка, г у середньому</span></div><div class="stat"><b>${N.kcal}</b><span>норма, ккал</span></div></div>
+    <svg viewBox="0 0 ${w} ${h}" width="100%" role="img" aria-label="Калорії за 7 днів" style="margin-top:10px"><line x1="${pad2}" y1="${h - pad2}" x2="${w - pad2}" y2="${h - pad2}" stroke="var(--line)"/>
+    <line x1="${pad2}" y1="${yv(N.kcal).toFixed(1)}" x2="${w - pad2}" y2="${yv(N.kcal).toFixed(1)}" stroke="var(--muted)" stroke-dasharray="4 4"/><text x="${w - pad2}" y="${(yv(N.kcal) - 4).toFixed(1)}" font-size="10" text-anchor="end">норма</text>${bars2}</svg>
+    <p class="muted sm">Дні без записів не враховуються в середньому.</p>`;
+}
+function analyticsHTML(checkins, sessions, ctx) {
   const ws = checkins.map(c => Number(c.weight_kg));
   const wa = checkins.filter(c => c.waist_cm != null).map(c => Number(c.waist_cm));
+  const wh = checkins.filter(c => c.hips_cm != null && Number(c.hips_cm) > 0).map(c => Number(c.hips_cm));
   const cutoff = addDaysISO(todayISO(), -28);
-  const last28 = sessions.filter(s => s.performed_on >= cutoff).length;
+  const last28 = sessions.filter(x => x.performed_on >= cutoff).length;
   const asc = sessions.slice().sort((a, b) => (a.performed_on < b.performed_on ? -1 : a.performed_on > b.performed_on ? 1 : 0));
-  const vols = asc.slice(-6).map(s => Number(s.volume_kg));
+  const vols = asc.slice(-6).map(x => Number(x.volume_kg));
   let trend = '—';
   if (asc.length >= 2) { const a = Number(asc[asc.length - 1].volume_kg), b = Number(asc[asc.length - 2].volume_kg); if (b > 0) { const p = Math.round((a - b) / b * 100); trend = (p >= 0 ? '+' : '−') + Math.abs(p) + '%'; } }
   const dw = ws.length >= 2 ? sgn(ws[ws.length - 1] - ws[0]) : '—';
   const dwa = wa.length >= 2 ? sgn(wa[wa.length - 1] - wa[0]) : '—';
+  let strength = '', week = '';
+  if (ctx && ctx.sl) {
+    const pick = ctx.slPick && ctx.sl.by[ctx.slPick] ? ctx.slPick : ctx.sl.names[0];
+    strength = `<div class="sec"><h3>Сила по вправах</h3>${ctx.sl.names.length ? `<select data-in="slpick" data-scope="${ctx.scope}" aria-label="Вправа">${ctx.sl.names.map(n => `<option value="${esc(n)}"${n === pick ? ' selected' : ''}>${esc(n)} (${ctx.sl.by[n].length})</option>`).join('')}</select>` : ''}<div id="slbox" style="margin-top:8px">${strengthBoxHTML(ctx.sl, pick)}</div></div>`;
+  }
+  if (ctx && ctx.week) week = `<div class="sec"><h3>Харчування за 7 днів</h3>${weekHTML(ctx.week, ctx.norm)}</div>`;
   return `<div class="tiles"><div class="stat"><b>${dw}</b><span>вага від початку, кг</span></div><div class="stat"><b>${dwa}</b><span>талія від початку, см</span></div>
     <div class="stat"><b>${last28}</b><span>тренувань за 4 тижні</span></div><div class="stat"><b>${trend}</b><span>обсяг до попереднього</span></div></div>
     <div class="sec"><h3>Вага, кг</h3>${chart(ws, 340, 160, 'Графік ваги')}</div>
     <div class="sec"><h3>Талія, см</h3>${chart(wa, 340, 160, 'Графік талії')}</div>
+    ${wh.length >= 2 ? `<div class="sec"><h3>Стегна, см</h3>${chart(wh, 340, 160, 'Графік стегон')}</div>` : ''}
+    ${strength}${week}
     <div class="sec"><h3>Обсяг тренувань, кг</h3>${vols.length ? bars(vols, 340, 160, 'Обсяг останніх тренувань') : '<p class="muted sm">Тренувань поки немає.</p>'}
     <p class="muted sm">Обсяг = вага × повторення за всі виконані підходи.</p></div>`;
 }
@@ -217,6 +278,10 @@ async function loadLastPerf() {
     if (!b || kg > b.kg || (kg === b.kg && rp > b.rp)) best[l.exercise_id] = { kg: kg, rp: rp };
   });
   Object.keys(best).forEach(id => { const b = best[id]; S.lastPerf[id] = b.kg ? fmt(b.kg) + ' кг × ' + b.rp : b.rp + ' повт.'; });
+}
+async function loadProgressExtras() {
+  S.weekEntries = await one(sb.from('food_entries').select('*').eq('client_id', S.me.id).gte('eaten_on', addDaysISO(todayISO(), -6)).order('eaten_on', { ascending: true }));
+  S.sl = await loadStrength(S.me.id, S.sessions);
 }
 async function loadClientData() {
   const id = S.me.id;
@@ -548,7 +613,7 @@ function clientCheckin() {
 }
 
 function clientProgress(sub) {
-  return `<div class="prog-title">Твій прогрес</div><div style="margin-top:10px">${analyticsHTML(S.checkins, S.sessions)}</div>
+  return `<div class="prog-title">Твій прогрес</div><div style="margin-top:10px">${analyticsHTML(S.checkins, S.sessions, { scope: 'c', sl: S.sl, slPick: S.slPick, week: S.weekEntries, norm: normOf(S.me) })}</div>
     <div class="callout"><b>${esc(S.me.tariff || 'Тариф не вказано')}</b><p>${esc(sub.t)}</p></div>`;
 }
 
@@ -616,8 +681,10 @@ async function openClient(id, dtab) {
     one(sb.from('checkins').select('*').eq('client_id', id).order('week_start', { ascending: true })),
     one(sb.from('payments').select('*').eq('client_id', id).order('paid_on', { ascending: false }))
   ]);
-  S.d = { c: c, intake: intake, sessions: sessions, checkins: checkins, payments: payments, date: todayISO(), entries: [], logs: {}, open: {}, norm: null, sub: null, fb: null };
+  S.d = { c: c, intake: intake, sessions: sessions, checkins: checkins, payments: payments, date: todayISO(), entries: [], logs: {}, open: {}, norm: null, sub: null, fb: null, edit: null, sl: null, slPick: '', week: [] };
   await loadDetailEntries();
+  S.d.week = await one(sb.from('food_entries').select('*').eq('client_id', id).gte('eaten_on', addDaysISO(todayISO(), -6)).order('eaten_on', { ascending: true }));
+  S.d.sl = await loadStrength(id, sessions);
 }
 async function refreshDetail() { const id = S.detailId, t = S.dtab; await reloadCoachLists(); await openClient(id, t); }
 async function remind(clientId, kind) {
@@ -696,7 +763,7 @@ function detailHTML() {
   const dt = [['profile', 'Профіль'], ['training', 'Тренування'], ['food', 'Харчування'], ['checkin', 'Check-in'], ['analytics', 'Аналітика'], ['sub', 'Підписка']];
   let body;
   if (S.dtab === 'profile') body = dProfile(); else if (S.dtab === 'training') body = dTraining(); else if (S.dtab === 'food') body = dFood();
-  else if (S.dtab === 'checkin') body = dCheckin(); else if (S.dtab === 'analytics') body = analyticsHTML(d.checkins, d.sessions); else body = dSub();
+  else if (S.dtab === 'checkin') body = dCheckin(); else if (S.dtab === 'analytics') body = analyticsHTML(d.checkins, d.sessions, { scope: 'd', sl: d.sl, slPick: d.slPick, week: d.week, norm: normOf(d.c) }); else body = dSub();
   return `<button class="back" data-act="back">‹ Усі клієнти</button>
     <div class="card" style="margin-top:0"><div class="inline between"><div><h2 style="margin:0">${esc(c.name)}</h2><div class="muted">${esc(c.goal || '')}</div></div><span class="chip ${sub.k}">${esc(sub.t)}</span></div>
     <div class="opts" style="margin:14px 0 6px" role="group" aria-label="Розділи клієнта">${dt.map(t => `<button data-act="dtab" data-tab="${t[0]}" aria-pressed="${S.dtab === t[0]}">${t[1]}</button>`).join('')}</div>${body}</div>`;
@@ -704,8 +771,11 @@ function detailHTML() {
 function dProfile() {
   const d = S.d, c = d.c;
   const inv = !c.profile_id ? `<div class="callout" style="margin-top:14px"><b>Клієнт ще не підключився</b><div class="invite">${esc(inviteLink(c))}</div><button class="btn sm" style="margin-top:10px" data-act="copyinv" data-id="${c.id}">Копіювати посилання</button></div>` : '';
-  if (!d.intake || !d.intake.completed_at) return `${inv}<div class="callout"><b>Анкета ще не заповнена.</b></div><button class="btn sm alt" style="margin-top:10px" data-act="remind" data-id="${c.id}" data-kind="intake"${reminded(c.id, 'intake') ? ' disabled' : ''}>${reminded(c.id, 'intake') ? 'Нагадування збережено' : 'Нагадати про анкету'}</button>`;
-  return `${inv}<div style="margin-top:14px">${intakeKV(d.intake)}</div>`;
+  const ed = d.edit || { name: c.name, goal: c.goal || '' };
+  const editForm = `<div class="sec" style="margin-top:14px"><h3>Основні дані</h3><label class="field" style="margin-top:0"><span>Імʼя</span><input type="text" data-in="ce_name" value="${esc(ed.name)}"></label>
+    <label class="field"><span>Ціль</span><input type="text" data-in="ce_goal" value="${esc(ed.goal)}"></label><button class="btn sm alt" style="margin-top:10px" data-act="cesave">Зберегти</button></div>`;
+  if (!d.intake || !d.intake.completed_at) return `${inv}${editForm}<div class="callout"><b>Анкета ще не заповнена.</b></div><button class="btn sm alt" style="margin-top:10px" data-act="remind" data-id="${c.id}" data-kind="intake"${reminded(c.id, 'intake') ? ' disabled' : ''}>${reminded(c.id, 'intake') ? 'Нагадування збережено' : 'Нагадати про анкету'}</button>`;
+  return `${inv}${editForm}<div class="sec"><h3>Анкета</h3>${intakeKV(d.intake)}</div>`;
 }
 function dTraining() {
   const d = S.d, c = d.c;
@@ -900,7 +970,7 @@ document.addEventListener('click', e => {
   switch (a) {
     case 'retry': location.reload(); break;
     /* --- клієнт --- */
-    case 'tab': run(async () => { S.tab = ds.tab; S.add = null; if (S.tab === 'today' || S.tab === 'food') { await refreshClient(); await loadEntries(); } if (S.tab === 'check') await loadCheckins(); if (S.tab === 'prog') { await loadCheckins(); await loadSessions(); } }); if (typeof window.scrollTo === 'function') window.scrollTo(0, 0); break;
+    case 'tab': run(async () => { S.tab = ds.tab; S.add = null; if (S.tab === 'today' || S.tab === 'food') { await refreshClient(); await loadEntries(); } if (S.tab === 'check') await loadCheckins(); if (S.tab === 'prog') { await loadCheckins(); await loadSessions(); await refreshMe(); await loadProgressExtras(); } }); if (typeof window.scrollTo === 'function') window.scrollTo(0, 0); break;
     case 'tick': { const L = getSet(ds.k); L.done = !L.done; S.finished = false; const w = curWorkout(); if (w) saveDraft(w); hap(); render(); break; }
     case 'finish': run(finishWorkout); break;
     case 'hist': {
@@ -956,6 +1026,12 @@ document.addEventListener('click', e => {
       }); break;
     }
     case 'copyinv': { const c = S.clients.find(x => x.id === id) || S.newClient; if (c) copyText(inviteLink(c)); break; }
+    case 'cesave': run(async () => {
+      const c = S.d.c, e = S.d.edit || { name: c.name, goal: c.goal || '' };
+      if (!e.name.trim()) { toast('Вкажи імʼя'); return; }
+      await one(sb.from('clients').update({ name: e.name.trim(), goal: e.goal.trim() || null }).eq('id', c.id));
+      await refreshDetail(); toast('Збережено');
+    }); break;
     case 'assign': run(async () => {
       const c = S.d.c, v = S.pickProg || c.program_id;
       if (!v) { toast('Спочатку створи програму'); return; }
@@ -1086,6 +1162,11 @@ document.addEventListener('input', e => {
   else if (f.indexOf('cf_') === 0) S.add.cf[f.slice(3)] = t.value;
   else if (f.indexOf('nc_') === 0) S.nc[f.slice(3)] = t.value;
   else if (f === 'pick') S.pickProg = t.value;
+  else if (f === 'ce_name' || f === 'ce_goal') { if (!S.d.edit) S.d.edit = { name: S.d.c.name, goal: S.d.c.goal || '' }; S.d.edit[f.slice(3)] = t.value; }
+  else if (f === 'slpick') {
+    const sc = t.dataset.scope; if (sc === 'd') S.d.slPick = t.value; else S.slPick = t.value;
+    const box = document.getElementById('slbox'); if (box) box.innerHTML = strengthBoxHTML(sc === 'd' ? S.d.sl : S.sl, t.value);
+  }
   else if (f === 'fb') S.d.fb = t.value;
   else if (f === 'norm') { const c = S.d.c; if (!S.d.norm) S.d.norm = { kcal: c.norm_kcal, p: c.norm_protein, f: c.norm_fat, c: c.norm_carbs }; S.d.norm[t.dataset.k] = t.value; }
   else if (f === 'sub_tariff' || f === 'sub_start' || f === 'sub_end') { const c = S.d.c; if (!S.d.sub) S.d.sub = { tariff: c.tariff || '', sub_start: c.sub_start || '', sub_end: c.sub_end || '' }; S.d.sub[f === 'sub_tariff' ? 'tariff' : f] = t.value; }
