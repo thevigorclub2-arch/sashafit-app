@@ -74,9 +74,14 @@ S.form = newForm();
 
 /* ---------- Telegram ---------- */
 function applyTheme() {
-  let dark = false;
-  try { dark = tg && tg.colorScheme ? tg.colorScheme === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches; } catch (e) { /* ігноруємо */ }
-  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  document.documentElement.dataset.theme = 'dark'; // фірмова тема: чорний і помаранчевий, незалежно від теми Telegram
+  try {
+    if (tg) {
+      if (tg.setHeaderColor) tg.setHeaderColor('#0B0B0C');
+      if (tg.setBackgroundColor) tg.setBackgroundColor('#0B0B0C');
+      if (tg.setBottomBarColor) tg.setBottomBarColor('#161617');
+    }
+  } catch (e) { /* ігноруємо */ }
 }
 function initTelegram() {
   applyTheme();
