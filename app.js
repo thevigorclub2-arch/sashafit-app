@@ -60,11 +60,12 @@ async function run(fn, okMsg) {
 /* ---------- стан ---------- */
 const S = {
   mode: 'loading', stage: '', role: null, uid: null, me: null, err: null,
-  tab: 'today', ctab: 'overview',
+  tab: 'dash', ctab: 'overview', ach: false,
   // клієнт
   intake: null, sessions: [], checkins: [], program: null, workouts: [], items: [], exMap: {}, lastPerf: {},
   log: {}, logFor: null, finished: false, pf: null, pfEdit: false, editCi: false,
   foodDate: todayISO(), entries: [], add: null, recents: [], offCache: {}, fd: null, zoom: '', weekEntries: [], sl: null, slPick: '', form: null, histOpen: {}, setLogs: {},
+  calOpen: '', calMonth: '', foodMonthMarks: {}, selTrainDate: '',
   // тренер
   overview: [], remLog: [], settings: null, clients: [], exercises: [], programs: [],
   detailId: null, dtab: 'checkin', d: null, nc: null, newClient: null, exf: null, exq: '', exgf: '', pb: null, ind: '', urlCache: {}
@@ -95,9 +96,10 @@ function initTelegram() {
 }
 function syncBack() {
   if (!tg || !tg.BackButton) return;
-  try { (S.role === 'coach' && (S.detailId || S.pb)) ? tg.BackButton.show() : tg.BackButton.hide(); } catch (e) { /* ігноруємо */ }
+  try { ((S.role === 'coach' && (S.detailId || S.pb)) || (S.role === 'client' && S.ach)) ? tg.BackButton.show() : tg.BackButton.hide(); } catch (e) { /* ігноруємо */ }
 }
 function goBack() {
+  if (S.role === 'client') { if (S.ach) { S.ach = false; render(); } return; }
   if (S.pb) S.pb = null; else if (S.detailId) { S.detailId = null; S.d = null; }
   render();
 }
@@ -230,6 +232,7 @@ function analyticsHTML(checkins, sessions, ctx) {
 function icon(n) {
   const P = {
     today: '<rect x="3" y="4" width="18" height="17" rx="3"/><path d="M8 2v4M16 2v4M3 10h18"/>',
+    grid: '<rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="8" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/>',
     food: '<path d="M6 3v8a3 3 0 0 0 3 3v7M9 3v6M12 3v8a3 3 0 0 1-3 3M18 3c-2 2-3 5-3 8h3v10"/>',
     check: '<rect x="5" y="4" width="14" height="17" rx="3"/><path d="M9 4V3h6v1M9 13l2 2 4-4"/>',
     prog: '<path d="M3 17l6-6 4 4 8-9M15 6h6v6"/>',
@@ -294,15 +297,65 @@ async function loadClientData() {
   S.pf = pfFromIntake(S.intake);
   await Promise.all([loadSessions(), loadCheckins(), loadProgram(), loadEntries()]);
   await loadLastPerf();
+  await loadProgressExtras();
 }
 async function refreshClient() { await refreshMe(); await loadProgram(); await loadSessions(); await loadLastPerf(); }
 
 /* ---------- тренування: допоміжне ---------- */
 function curWorkout() {
   if (!S.program || !S.workouts.length) return null;
+  const iso = (new Date().getDay() + 6) % 7 + 1; // 1=Пн..7=Нд
+  const scheduled = S.workouts.find(w => w.weekday === iso);
+  if (scheduled) return scheduled;
   const ids = new Set(S.workouts.map(w => w.id));
   const done = S.sessions.filter(s => ids.has(s.workout_id)).length;
   return S.workouts[done % S.workouts.length];
+}
+/* ---------- календар: спільний компонент для харчування і тренувань ---------- */
+const WD_LABELS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Нд'];
+function monthGridHTML(monthStart, marks, selected, act) {
+  const first = parseISO(monthStart);
+  const startWd = (first.getDay() + 6) % 7;
+  const daysInMonth = new Date(first.getFullYear(), first.getMonth() + 1, 0).getDate();
+  const cells = [];
+  for (let i = 0; i < startWd; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(first.getFullYear() + '-' + pad(first.getMonth() + 1) + '-' + pad(d));
+  while (cells.length % 7) cells.push(null);
+  const todayS = todayISO();
+  const monthLabel = first.toLocaleDateString('uk-UA', { month: 'long', year: 'numeric' });
+  return `<div class="cal">
+    <div class="cal-head"><button data-act="calnav" data-dir="-1" aria-label="Попередній місяць">‹</button><span style="text-transform:capitalize">${monthLabel}</span><button data-act="calnav" data-dir="1" aria-label="Наступний місяць">›</button></div>
+    <div class="cal-grid cal-wd">${WD_LABELS.map(w => `<span>${w}</span>`).join('')}</div>
+    <div class="cal-grid">${cells.map(d => {
+      if (!d) return '<span></span>';
+      const mark = marks[d], isToday = d === todayS, isSel = d === selected;
+      const dotCls = mark === 'done' ? 'd-done' : mark === 'planned' ? 'd-plan' : '';
+      return `<button class="calday${isToday ? ' is-today' : ''}${isSel ? ' is-sel' : ''}" data-act="${act}" data-date="${d}">${parseInt(d.slice(8), 10)}${dotCls ? `<i class="${dotCls}"></i>` : ''}</button>`;
+    }).join('')}</div></div>`;
+}
+async function loadFoodMonth(monthStart) {
+  const lastDay = addDaysISO(addMonthsISO(monthStart, 1), -1);
+  const rows = await one(sb.from('food_entries').select('*').eq('client_id', S.me.id).gte('eaten_on', monthStart).lte('eaten_on', lastDay));
+  const marks = {}; rows.forEach(r => { marks[r.eaten_on] = 'done'; });
+  S.foodMonthMarks = marks;
+}
+function trainingMarks(monthStart) {
+  const lastDay = addDaysISO(addMonthsISO(monthStart, 1), -1), marks = {};
+  S.sessions.forEach(s => { if (s.performed_on >= monthStart && s.performed_on <= lastDay) marks[s.performed_on] = 'done'; });
+  if (S.workouts.some(w => w.weekday)) {
+    let cur = monthStart > todayISO() ? monthStart : todayISO();
+    while (cur <= lastDay) {
+      if (!marks[cur]) { const wd = (parseISO(cur).getDay() + 6) % 7 + 1; if (S.workouts.some(w => w.weekday === wd)) marks[cur] = 'planned'; }
+      cur = addDaysISO(cur, 1);
+    }
+  }
+  return marks;
+}
+function trainInfoHTML(date) {
+  const sessions = S.sessions.filter(s => s.performed_on === date);
+  if (sessions.length) return `<div class="sec"><h3>${fmtDate(date)}</h3>${histHTML(sessions, S.histOpen, S.setLogs, 'hist')}</div>`;
+  const wd = (parseISO(date).getDay() + 6) % 7 + 1, planned = S.workouts.find(w => w.weekday === wd);
+  return `<div class="sec"><h3>${fmtDate(date)}</h3><p class="muted sm">${planned ? 'Заплановано: ' + esc(planned.name) : 'Тренувань не заплановано'}</p></div>`;
 }
 const wkItems = w => S.items.filter(i => i.workout_id === w.id).sort((a, b) => a.position - b.position);
 const exName = id => (S.exMap[id] ? S.exMap[id].name : 'Вправа');
@@ -487,9 +540,12 @@ async function submitCheckin() {
    ===================================================================== */
 function clientHTML() {
   const c = S.me, sub = subInfo(c);
-  const tabs = [['today', 'Тренування', 'today'], ['food', 'Харчування', 'food'], ['check', 'Check-in', 'check'], ['prog', 'Прогрес', 'prog'], ['me', 'Профіль', 'user']];
-  const body = S.tab === 'today' ? clientToday() : S.tab === 'food' ? clientFood() : S.tab === 'check' ? clientCheckin() : S.tab === 'prog' ? clientProgress(sub) : clientProfile(sub);
-  return `<div class="wrap"><div class="ph-head"><div class="muted sm">${esc(fmtDateLong(todayISO()))}</div><h1 class="hello">Привіт, ${esc(first(c.name))}</h1><span class="chip ${sub.k}">${esc(sub.t)}</span></div>
+  const head = `<div class="ph-head"><div class="muted sm">${esc(fmtDateLong(todayISO()))}</div><h1 class="hello">Привіт, ${esc(first(c.name))}</h1><span class="chip ${sub.k}">${esc(sub.t)}</span></div>`;
+  if (S.ach) return `<div class="wrap">${head}<div class="ph-body">${achievementsHTML(c)}</div></div>`;
+  if (!(S.intake && S.intake.completed_at)) return `<div class="wrap">${head}<div class="ph-body">${onboardingHTML()}</div></div>`;
+  const tabs = [['dash', 'Дашборд', 'grid'], ['today', 'Тренування', 'today'], ['food', 'Харчування', 'food'], ['check', 'Check-in', 'check'], ['me', 'Профіль', 'user']];
+  const body = S.tab === 'dash' ? clientDash(c) : S.tab === 'today' ? clientToday() : S.tab === 'food' ? clientFood() : S.tab === 'check' ? clientCheckin() : clientProfileFull(sub);
+  return `<div class="wrap">${head}
     <div class="ph-body">${body}</div></div>
     <div class="tabbar"><nav class="tabs" aria-label="Розділи">${tabs.map(t => `<button data-act="tab" data-tab="${t[0]}"${S.tab === t[0] ? ' aria-current="page"' : ''}>${icon(t[2])}${t[1]}</button>`).join('')}</nav></div>`;
 }
@@ -513,13 +569,117 @@ function histHTML(list, open, logs, act) {
     return `<button class="hist btn-like" data-act="${act}" data-id="${h.id}"><span>${fmtDate(h.performed_on)} · ${esc(h.title)}</span><span class="muted">${h.total_sets} підх. · ${r0(Number(h.volume_kg))} кг</span></button>${sub}`;
   }).join('');
 }
+/* ---------- дашборд і ачівки ---------- */
+const weekStartOfISO = s => { const d = parseISO(s); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return iso(d); };
+function workoutStreakWeeks(sessions, plan) {
+  const byWeek = {};
+  sessions.forEach(x => { const w = weekStartOfISO(x.performed_on); byWeek[w] = (byWeek[w] || 0) + 1; });
+  const need = Math.max(1, Number(plan) || 1);
+  let week = mondayISO(), streak = 0;
+  while (byWeek[week] && byWeek[week] >= need) { streak++; week = addDaysISO(week, -7); }
+  return streak;
+}
+function checkinStreakWeeks(checkins) {
+  if (!checkins.length) return 0;
+  const set = {}; checkins.forEach(c => { set[c.week_start] = true; });
+  let week = checkins[checkins.length - 1].week_start, streak = 0;
+  while (set[week]) { streak++; week = addDaysISO(week, -7); }
+  return streak;
+}
+// Для кожної вправи: чи є останній запис одночасно найкращим (тобто це ще діючий рекорд)
+function currentRecords(sl) {
+  if (!sl || !sl.names.length) return [];
+  const out = [];
+  sl.names.forEach(n => {
+    const pts = sl.by[n]; const useKg = pts.some(p => p.kg > 0);
+    const vals = pts.map(p => (useKg ? p.kg : p.rp));
+    const max = Math.max.apply(null, vals), last = vals.length - 1;
+    if (vals[last] === max) out.push({ name: n, value: max, unit: useKg ? 'кг' : 'повт.', d: pts[last].d });
+  });
+  return out.sort((a, b) => (a.d < b.d ? 1 : a.d > b.d ? -1 : 0));
+}
+function computeAchievements(c) {
+  const recs = currentRecords(S.sl);
+  return { streakWeeks: workoutStreakWeeks(S.sessions, c.workouts_plan), checkinWeeks: checkinStreakWeeks(S.checkins), record: recs[0] || null, records: recs };
+}
+function achievementsHTML(c) {
+  const a = computeAchievements(c);
+  const recsHTML = a.records.length
+    ? a.records.map(r => `<div class="hist" style="cursor:default"><span>${esc(r.name)}</span><span class="muted">${fmt(r.value)} ${r.unit} · ${fmtDate(r.d)}</span></div>`).join('')
+    : '<p class="muted sm">Виконай кілька тренувань, і тут з’являться особисті рекорди.</p>';
+  return `<button class="back" data-act="back">‹ Назад</button>
+    <div class="prog-title" style="margin-top:8px">Ачівки</div>
+    <div class="tiles" style="margin-top:12px"><div class="stat"><b>${a.streakWeeks}</b><span>тижнів поспіль з планом тренувань</span></div>
+    <div class="stat"><b>${a.checkinWeeks}</b><span>тижнів поспіль із check-in</span></div></div>
+    <div class="sec"><h3>Особисті рекорди</h3>${recsHTML}</div>`;
+}
+function checkinHistoryHTML(list) {
+  if (!list.length) return '<p class="muted sm">Ще немає жодного check-in.</p>';
+  return list.slice().reverse().map(k => `<div class="hist" style="cursor:default"><span>${fmtDate(k.week_start)}</span><span class="muted">${fmt(k.weight_kg)} кг${k.waist_cm != null ? ' · талія ' + fmt(k.waist_cm) : ''}${k.coach_feedback ? ' · є відгук' : ''}</span></div>`).join('');
+}
+function clientDash(c) {
+  const ach = computeAchievements(c);
+  const cw = curWorkout();
+  let wDone = 0, wTotal = 0;
+  if (cw) { wkItems(cw).forEach((it, i) => { for (let s = 0; s < it.sets; s++) { wTotal++; const L = S.log[i + ':' + s]; if (L && L.done) wDone++; } }); }
+  const t = totalsOf(S.entries), N = normOf(c);
+  const ws = S.checkins.map(k => Number(k.weight_kg));
+  const target = S.intake && S.intake.target_weight_kg;
+  const goalLabel = (S.intake && S.intake.goal) || c.goal || 'Ціль не вказана';
+  const sub = subInfo(c);
+
+  const tasks = [];
+  if (sub.k === 'bad' || sub.k === 'warn') tasks.push({ k: sub.k, t: sub.t, tab: null });
+  if (!(S.intake && S.intake.completed_at)) tasks.push({ k: 'warn', t: 'Анкета ще не заповнена', tab: 'me' });
+  if (!S.checkins.some(k => k.week_start === mondayISO())) tasks.push({ k: 'warn', t: 'Check-in за цей тиждень ще не надіслано', tab: 'check' });
+  const lastFb = S.checkins.slice().reverse().find(k => k.coach_feedback);
+  if (lastFb) tasks.push({ k: 'good', t: 'Тренер залишив відгук на check-in', tab: 'check' });
+  const taskHTML = tasks.length
+    ? tasks.map(x => `<${x.tab ? 'button' : 'div'} class="att" style="width:100%;text-align:left;border:0;background:none;padding:9px 0;${x.tab ? 'cursor:pointer' : ''}"${x.tab ? ` data-act="tab" data-tab="${x.tab}"` : ''}><span class="dot ${x.k}"></span><span class="grow" style="font-size:13px">${esc(x.t)}</span></${x.tab ? 'button' : 'div'}>`).join('')
+    : '<p class="muted sm">Усе за планом. Гарного дня!</p>';
+
+  return `
+  <div class="card" style="margin-top:0"><div class="inline between"><span class="muted sm">Ціль · ${esc(goalLabel)}</span><button class="ghost" style="padding:4px 10px;font-size:11px" data-act="tab" data-tab="me">Профіль →</button></div>
+    <div class="inline between" style="margin-top:8px">
+      <div>${ws.length ? `<span style="font:700 22px 'Unbounded',sans-serif">${fmt(ws[ws.length - 1])}</span><span class="muted sm"> кг зараз</span>` : '<span class="muted sm">Ще немає жодного check-in</span>'}</div>
+      ${ws.length > 1 && ws[0] !== ws[ws.length - 1] ? `<span class="chip ${ws[ws.length - 1] < ws[0] ? 'good' : 'warn'}">${sgn(ws[ws.length - 1] - ws[0])} кг${target ? ', ціль ' + fmt(target) : ''}</span>` : (target ? `<span class="chip plain">ціль ${fmt(target)} кг</span>` : '')}
+    </div>
+    <div class="tiles" style="grid-template-columns:repeat(4,1fr);margin-top:10px">
+      <div class="stat" style="padding:8px 2px;text-align:center"><b style="font-size:14px">${N.kcal}</b><span style="font-size:10px">ккал</span></div>
+      <div class="stat" style="padding:8px 2px;text-align:center"><b style="font-size:14px">${N.p}</b><span style="font-size:10px">білки</span></div>
+      <div class="stat" style="padding:8px 2px;text-align:center"><b style="font-size:14px">${N.f}</b><span style="font-size:10px">жири</span></div>
+      <div class="stat" style="padding:8px 2px;text-align:center"><b style="font-size:14px">${N.c}</b><span style="font-size:10px">вугл.</span></div>
+    </div></div>
+
+  <div class="tiles" style="margin-top:10px">
+    <button class="stat" style="text-align:left;border:0;cursor:pointer" data-act="ach"><b>${ach.streakWeeks}</b><span>тижнів поспіль з планом</span></button>
+    <button class="stat" style="text-align:left;border:0;cursor:pointer" data-act="ach"><b>${ach.record ? fmt(ach.record.value) + ' ' + ach.record.unit : '—'}</b><span>${ach.record ? 'рекорд: ' + ach.record.name : 'рекордів ще немає'}</span></button>
+  </div>
+
+  <button class="card" style="width:100%;text-align:left;display:block;cursor:pointer" data-act="tab" data-tab="today">
+    <div class="inline between"><span style="font-weight:500;font-size:14px">${cw ? 'Тренування на сьогодні' : 'Тренування'}</span><span class="muted">›</span></div>
+    ${cw ? `<div class="muted sm" style="margin-top:2px">${esc(cw.name)}${wTotal ? ` · ${wDone}/${wTotal} підходів` : ''}</div>` : '<p class="muted sm" style="margin-top:4px">Тренер ще не призначив програму.</p>'}
+  </button>
+
+  <button class="card" style="width:100%;text-align:left;display:block;cursor:pointer" data-act="tab" data-tab="food">
+    <div class="inline between"><span style="font-weight:500;font-size:14px">Харчування</span><span class="muted">›</span></div>
+    <div class="muted sm" style="margin:4px 0 6px">${r0(t.k)} / ${N.kcal} ккал сьогодні</div>
+    <div class="bar"><i class="${t.k > N.kcal * 1.05 ? 'over' : ''}" style="width:${Math.min(100, N.kcal ? t.k / N.kcal * 100 : 0).toFixed(0)}%"></i></div>
+  </button>
+
+  <div class="sec"><h3>Сьогодні</h3>${taskHTML}</div>`;
+}
+
 function clientToday() {
   const banner = S.intake && S.intake.completed_at ? '' : `<div class="callout"><b>Заповни анкету</b><p>Це займе дві хвилини, і тренер підбере програму під тебе.</p><button class="btn sm" style="margin-top:10px" data-act="tab" data-tab="me">Відкрити анкету</button></div>`;
   const w = curWorkout();
   const hist = `<div class="sec"><h3>Щоденник тренувань</h3>${histHTML(S.sessions.slice(0, 5), S.histOpen, S.setLogs, 'hist')}</div>`;
   const weekN = S.sessions.filter(s => s.performed_on >= mondayISO()).length;
   const weekly = `<div class="muted sm" style="margin-top:4px">Цього тижня: ${weekN} з ${S.me.workouts_plan}</div>`;
-  if (!w) return banner + feedbackBox() + '<div class="prog-title">Програму ще не призначено</div><p class="muted">Тренер призначить програму найближчим часом.</p>' + hist;
+  const calBtn = `<button class="calopen" data-act="calopen" data-which="training">${S.calOpen === 'training' ? 'Закрити календар' : 'Відкрити календар'}</button>`;
+  const calBlock = S.calOpen === 'training' ? monthGridHTML(S.calMonth, trainingMarks(S.calMonth), S.selTrainDate, 'tday') : '';
+  const calSec = calBtn + calBlock + (S.selTrainDate ? trainInfoHTML(S.selTrainDate) : '');
+  if (!w) return banner + feedbackBox() + calSec + '<div class="prog-title">Програму ще не призначено</div><p class="muted">Тренер призначить програму найближчим часом.</p>' + hist;
   syncLog(w);
   const items = wkItems(w); let total = 0, done = 0;
   const exHTML = items.map((it, i) => {
@@ -541,7 +701,7 @@ function clientToday() {
   }).join('');
   const segs = Array.from({ length: total }, (_, k) => `<i class="${k < done ? 'on' : ''}"></i>`).join('');
   const saved = S.finished ? '<div class="callout"><b>Тренування збережено в щоденнику.</b> Нижче наступне за програмою.</div>' : '';
-  return `${banner}${feedbackBox()}${saved}<div class="prog-title">${esc(S.program.name)}</div><div class="muted sm">${esc(w.name)} · ${items.length} вправ</div>
+  return `${banner}${feedbackBox()}${calSec}${saved}<div class="prog-title">${esc(S.program.name)}</div><div class="muted sm">${esc(w.name)} · ${items.length} вправ</div>
     <div class="big">${done}<small>/${total}</small></div><div class="muted sm">підходів виконано</div>${weekly}<div class="segs" aria-hidden="true">${segs}</div>${exHTML}
     <button class="btn" data-act="finish" style="margin-top:12px">Завершити тренування</button>${hist}`;
 }
@@ -598,7 +758,10 @@ function clientFood() {
     return `<section class="meal"><div class="inline between"><h3>${m.n}</h3><span class="muted sm">${r0(sum)} ккал</span></div>${rows}
       ${open ? addPanelHTML() : `<button class="btn sm alt" style="margin-top:10px" data-act="addopen" data-m="${m.id}">+ Додати продукт</button>`}</section>`;
   }).join('');
+  const calBtn = `<button class="calopen" data-act="calopen" data-which="food">${S.calOpen === 'food' ? 'Закрити календар' : 'Відкрити календар'}</button>`;
+  const calBlock = S.calOpen === 'food' ? monthGridHTML(S.calMonth, S.foodMonthMarks, S.foodDate, 'fday') : '';
   return `<div class="datebar"><button data-act="fdate" data-n="-1" aria-label="Попередній день">‹</button><div class="prog-title">${S.foodDate === todayISO() ? 'Сьогодні' : esc(fmtDateLong(S.foodDate))}</div><button data-act="fdate" data-n="1" aria-label="Наступний день">›</button></div>
+    ${calBtn}${calBlock}
     <div class="muted sm">Норма від тренера: ${N.kcal} ккал</div><div class="big">${r0(t.k)}<small> ккал</small></div>${nutBars(t, N)}<div style="margin-top:14px">${meals}</div>`;
 }
 
@@ -634,11 +797,6 @@ function clientCheckin() {
     <button class="btn" data-act="submit" style="margin-top:16px">Надіслати тренеру</button>`;
 }
 
-function clientProgress(sub) {
-  return `<div class="prog-title">Твій прогрес</div><div style="margin-top:10px">${analyticsHTML(S.checkins, S.sessions, { scope: 'c', sl: S.sl, slPick: S.slPick, week: S.weekEntries, norm: normOf(S.me) })}</div>
-    <div class="callout"><b>${esc(S.me.tariff || 'Тариф не вказано')}</b><p>${esc(sub.t)}</p></div>`;
-}
-
 function optsHTML(f, vals) {
   return '<div class="opts">' + vals.map(v => `<button data-act="pf" data-f="${f}" data-v="${esc(v)}" aria-pressed="${S.pf[f] === v}">${esc(v)}</button>`).join('') + '</div>';
 }
@@ -648,14 +806,7 @@ function intakeKV(i) {
     <dt>Де тренується</dt><dd>${v(i.place)}</dd><dt>Вік</dt><dd>${v(i.age)}</dd><dt>Зріст</dt><dd>${i.height_cm ? fmt(i.height_cm) + ' см' : '—'}</dd>
     <dt>Бажана вага</dt><dd>${i.target_weight_kg ? fmt(i.target_weight_kg) + ' кг' : '—'}</dd><dt>Травми, обмеження</dt><dd>${v(i.injuries)}</dd><dt>Харчові обмеження</dt><dd>${v(i.diet_notes)}</dd></dl>`;
 }
-function clientProfile(sub) {
-  const c = S.me;
-  if (S.intake && S.intake.completed_at && !S.pfEdit) {
-    return `<div class="prog-title">${esc(c.name)}</div><div class="muted sm">${esc(c.goal || '')}</div>
-      <div class="callout"><b>Анкета заповнена.</b> Тренер бачить її у твоєму профілі.</div><div style="margin-top:16px">${intakeKV(S.intake)}</div>
-      <button class="btn alt" style="margin-top:16px" data-act="pfedit">Змінити анкету</button>
-      <div class="callout"><b>${esc(c.tariff || 'Тариф не вказано')}</b><p>${esc(sub.t)}</p></div>`;
-  }
+function anketaFormHTML() {
   const p = S.pf;
   return `<div class="prog-title">Анкета</div><div class="muted sm">Відповіді бачить лише твій тренер</div>
     <span class="lbl">Головна ціль</span>${optsHTML('goal', ['Схуднення', "Набір м'язів", 'Підтягнути тіло', 'Сила та витривалість'])}
@@ -668,6 +819,24 @@ function clientProfile(sub) {
     <label class="field"><span>Травми та обмеження</span><textarea data-in="pf_injuries" placeholder="Наприклад: болить коліно. Або «немає»">${esc(p.injuries)}</textarea></label>
     <label class="field"><span>Харчові обмеження та алергії</span><textarea data-in="pf_diet" placeholder="Що не їси, на що є алергія">${esc(p.diet)}</textarea></label>
     <button class="btn" data-act="pfsave" style="margin-top:16px">Зберегти анкету</button>`;
+}
+function onboardingHTML() {
+  return `<div class="prog-title">Ласкаво просимо!</div><p class="muted sm" style="margin-top:4px">Заповни коротку анкету, щоб потрапити в застосунок. Це займе дві хвилини, і тренер підбере програму під тебе.</p>${anketaFormHTML()}`;
+}
+function clientProfileFull(sub) {
+  const c = S.me;
+  const top = (S.intake && S.intake.completed_at && !S.pfEdit)
+    ? `<div class="prog-title">${esc(c.name)}</div><div class="muted sm">${esc(c.goal || '')}</div>
+      <div class="callout"><b>Анкета заповнена.</b> Тренер бачить її у твоєму профілі.</div><div style="margin-top:16px">${intakeKV(S.intake)}</div>
+      <button class="btn alt" style="margin-top:16px" data-act="pfedit">Змінити анкету</button>`
+    : anketaFormHTML();
+  const N = normOf(c);
+  return `${top}
+    <div class="sec"><h3>Норма харчування</h3><div class="tiles"><div class="stat"><b>${N.kcal}</b><span>ккал</span></div><div class="stat"><b>${N.p}</b><span>білки, г</span></div>
+    <div class="stat"><b>${N.f}</b><span>жири, г</span></div><div class="stat"><b>${N.c}</b><span>вуглеводи, г</span></div></div></div>
+    <div class="sec"><h3>Прогрес</h3>${analyticsHTML(S.checkins, S.sessions, { scope: 'c', sl: S.sl, slPick: S.slPick, week: S.weekEntries, norm: N })}</div>
+    <div class="sec"><h3>Історія check-in</h3>${checkinHistoryHTML(S.checkins)}</div>
+    <div class="callout"><b>${esc(c.tariff || 'Тариф не вказано')}</b><p>${esc(sub.t)}</p></div>`;
 }
 
 /* =====================================================================
@@ -915,16 +1084,19 @@ function builderHTML() {
       <label class="unit"><input type="number" min="1" data-in="ireps" data-w="${w.id}" data-i="${i}" value="${it.reps}" aria-label="Повторення"><span>повт.</span></label>
       <label class="unit"><input type="number" min="0" step="0.5" data-in="ikg" data-w="${w.id}" data-i="${i}" value="${it.kg}" aria-label="Вага"><span>кг</span></label>
       <div class="mv"><button class="x" data-act="itup" data-w="${w.id}" data-i="${i}" aria-label="Вгору">↑</button><button class="x" data-act="itdn" data-w="${w.id}" data-i="${i}" aria-label="Вниз">↓</button><button class="x" data-act="itdel" data-w="${w.id}" data-i="${i}" aria-label="Прибрати">×</button></div></div>`).join('');
+    const wdChips = WD_LABELS.map((lbl, i) => `<button data-act="wkwd" data-w="${w.id}" data-v="${i + 1}" aria-pressed="${w.weekday === i + 1}">${lbl}</button>`).join('')
+      + `<button data-act="wkwd" data-w="${w.id}" data-v="" aria-pressed="${!w.weekday}">За чергою</button>`;
     return `<div class="wk"><div class="inline"><input type="text" style="flex:1" data-in="wname" data-w="${w.id}" value="${esc(w.name)}" aria-label="Назва тренування">
       <button class="x" data-act="wkup" data-w="${w.id}" aria-label="Тренування вгору"${wi === 0 ? ' disabled' : ''}>↑</button><button class="x" data-act="wkdn" data-w="${w.id}" aria-label="Тренування вниз"${wi === pb.wks.length - 1 ? ' disabled' : ''}>↓</button>
       ${pb.wks.length > 1 ? `<button class="btn sm alt" data-act="wkdel" data-w="${w.id}">Видалити день</button>` : ''}</div>
+      <div class="opts" style="margin-top:8px">${wdChips}</div>
       ${rows || '<p class="muted sm" style="margin-top:10px">Додай першу вправу.</p>'}
       <div class="inline" style="margin-top:12px"><select data-in="addex" data-w="${w.id}" aria-label="Вправа для додавання">${exOptions(S.addEx && S.addEx[w.id])}</select><button class="btn sm" data-act="itadd" data-w="${w.id}">Додати вправу</button></div></div>`;
   }).join('');
   return `<button class="back" data-act="back">‹ Усі програми</button>
     <div class="card" style="margin-top:0"><label class="field" style="margin-top:0"><span>Назва програми</span><input type="text" data-in="pname" value="${esc(pb.name)}"></label>
     <div class="saved" id="savedInd" style="margin-top:6px">${esc(S.ind)}</div>
-    <p class="muted sm" style="margin-top:6px">Програма складається з тренувань (днів). Клієнт проходить їх по черзі.</p>${wks}
+    <p class="muted sm" style="margin-top:6px">Обери день тижня, щоб тренування завжди показувалось клієнту в цей день. «За чергою» — без прив’язки до дат, тренування йдуть послідовно.</p>${wks}
     <button class="btn alt" style="margin-top:14px" data-act="wkadd">+ Додати тренування (день)</button></div>`;
 }
 
@@ -936,7 +1108,7 @@ function later(key, fn) {
   timers[key] = setTimeout(async () => { try { await fn(); setInd('Збережено'); } catch (e) { console.error(e); setInd(''); toast(errMsg(e)); } }, 600);
 }
 async function saveWk(w, idx) {
-  await one(sb.from('program_workouts').update({ name: w.name, position: idx }).eq('id', w.id));
+  await one(sb.from('program_workouts').update({ name: w.name, position: idx, weekday: w.weekday || null }).eq('id', w.id));
   await one(sb.from('workout_items').delete().eq('workout_id', w.id));
   if (w.items.length) await one(sb.from('workout_items').insert(w.items.map((it, i) => ({ workout_id: w.id, position: i, exercise_id: it.ex, sets: it.sets, reps: it.reps, weight_kg: it.kg }))));
 }
@@ -947,7 +1119,7 @@ async function openProgram(id) {
   const ids = wks.map(w => w.id);
   const items = ids.length ? await one(sb.from('workout_items').select('*').in('workout_id', ids).order('position')) : [];
   S.addEx = {};
-  S.pb = { id: id, name: p.name, wks: wks.map(w => ({ id: w.id, name: w.name, items: items.filter(i => i.workout_id === w.id).sort((a, b) => a.position - b.position).map(i => ({ ex: i.exercise_id, sets: i.sets, reps: i.reps, kg: Number(i.weight_kg) })) })) };
+  S.pb = { id: id, name: p.name, wks: wks.map(w => ({ id: w.id, name: w.name, weekday: w.weekday || null, items: items.filter(i => i.workout_id === w.id).sort((a, b) => a.position - b.position).map(i => ({ ex: i.exercise_id, sets: i.sets, reps: i.reps, kg: Number(i.weight_kg) })) })) };
   S.ind = '';
 }
 const findWk = id => (S.pb ? S.pb.wks.find(w => w.id === id) : null);
@@ -996,7 +1168,16 @@ document.addEventListener('click', e => {
   switch (a) {
     case 'retry': location.reload(); break;
     /* --- клієнт --- */
-    case 'tab': run(async () => { S.tab = ds.tab; S.add = null; if (S.tab === 'today' || S.tab === 'food') { await refreshClient(); await loadEntries(); } if (S.tab === 'check') await loadCheckins(); if (S.tab === 'prog') { await loadCheckins(); await loadSessions(); await refreshMe(); await loadProgressExtras(); } }); if (typeof window.scrollTo === 'function') window.scrollTo(0, 0); break;
+    case 'tab': run(async () => {
+      S.tab = ds.tab; S.add = null; S.ach = false;
+      if (S.tab === 'dash' || S.tab === 'today' || S.tab === 'food') { await refreshClient(); await loadEntries(); }
+      if (S.tab === 'dash' || S.tab === 'check' || S.tab === 'me') await loadCheckins();
+      if (S.tab === 'dash' || S.tab === 'me') {
+        await loadProgressExtras();
+        if (!S.pfEdit) { S.intake = await one(sb.from('intake').select('*').eq('client_id', S.me.id).maybeSingle()); S.pf = pfFromIntake(S.intake); }
+      }
+    }); if (typeof window.scrollTo === 'function') window.scrollTo(0, 0); break;
+    case 'ach': S.ach = true; render(true); break;
     case 'tick': { const L = getSet(ds.k); L.done = !L.done; S.finished = false; const w = curWorkout(); if (w) saveDraft(w); hap(); render(); break; }
     case 'finish': run(finishWorkout); break;
     case 'hist': {
@@ -1028,6 +1209,19 @@ document.addEventListener('click', e => {
     }
     case 'delent': run(async () => { await one(sb.from('food_entries').delete().eq('id', id)); await loadEntries(); }); break;
     case 'fdate': run(async () => { S.foodDate = addDaysISO(S.foodDate, +ds.n); S.add = null; await loadEntries(); }); break;
+    case 'calopen': {
+      const which = ds.which; S.calOpen = which; S.calMonth = (which === 'food' ? S.foodDate : (S.selTrainDate || todayISO())).slice(0, 8) + '01';
+      if (which === 'food') run(async () => { await loadFoodMonth(S.calMonth); }); else render();
+      break;
+    }
+    case 'calclose': S.calOpen = ''; render(); break;
+    case 'calnav': {
+      S.calMonth = addMonthsISO(S.calMonth, +ds.dir);
+      if (S.calOpen === 'food') run(async () => { await loadFoodMonth(S.calMonth); }); else render();
+      break;
+    }
+    case 'fday': run(async () => { S.foodDate = ds.date; S.calOpen = ''; S.add = null; await loadEntries(); }); break;
+    case 'tday': S.selTrainDate = ds.date; render(); break;
     case 'mood': S.form.mood = +ds.v; S.form.touched = true; render(); break;
     case 'pickphoto': { const el = document.getElementById('ph' + ds.i); if (el) el.click(); break; }
     case 'editci': S.editCi = true; S.form = newForm(); render(); break;
@@ -1163,6 +1357,7 @@ document.addEventListener('click', e => {
       if (typeof confirm === 'function' && !confirm('Видалити це тренування?')) break;
       run(async () => { await one(sb.from('program_workouts').delete().eq('id', ds.w)); S.pb.wks = S.pb.wks.filter(w => w.id !== ds.w); await savePositions(); }); break;
     }
+    case 'wkwd': { const w = findWk(ds.w); if (!w) break; w.weekday = ds.v ? +ds.v : null; render(); later(ds.w, () => saveWk(w, S.pb.wks.indexOf(w))); break; }
     case 'wkup': case 'wkdn': run(async () => {
       const i = S.pb.wks.findIndex(w => w.id === ds.w), j = a === 'wkup' ? i - 1 : i + 1;
       if (j < 0 || j >= S.pb.wks.length) return;

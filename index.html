@@ -146,6 +146,18 @@ svg text{fill:var(--muted);font-family:'Onest',system-ui,sans-serif}
 .back{border:0;background:none;color:var(--accent);padding:10px 0;cursor:pointer;font-weight:500;min-height:44px}
 .saved{font-size:13px;color:var(--muted)}
 
+.calopen{border:1px solid var(--line);background:none;border-radius:10px;padding:7px 12px;font-size:12px;cursor:pointer;color:var(--accent);margin-top:8px}
+.cal{margin-top:10px}
+.cal-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:13px;font-weight:500}
+.cal-head button{border:1px solid var(--line);background:none;color:var(--ink);width:30px;height:30px;border-radius:8px;cursor:pointer}
+.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;text-align:center}
+.cal-wd{margin-bottom:2px;color:var(--muted);font-size:11px}
+.calday{position:relative;aspect-ratio:1;border:0;background:var(--paper);border-radius:8px;font-size:12px;color:var(--ink);cursor:pointer;display:flex;align-items:center;justify-content:center;min-height:0}
+.calday.is-today{outline:1px solid var(--accent);outline-offset:-1px}
+.calday.is-sel{background:var(--accent);color:var(--accent-ink);font-weight:600}
+.calday i{position:absolute;bottom:3px;left:50%;transform:translateX(-50%);width:4px;height:4px;border-radius:50%;background:var(--muted)}
+.calday i.d-done{background:var(--accent)}
+.calday.is-sel i{background:var(--accent-ink)}
 .exhead{display:flex;gap:12px;align-items:flex-start}
 .exthumb{width:76px;height:76px;border-radius:12px;object-fit:cover;background:var(--paper);border:1px solid var(--line);cursor:zoom-in;flex:none}
 .exthumb.s{width:48px;height:48px;border-radius:10px}
@@ -160,8 +172,8 @@ svg text{fill:var(--muted);font-family:'Onest',system-ui,sans-serif}
 <div id="app"></div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="config.js?v=10"></script>
-<script src="demo.js?v=10"></script>
-<script src="app.js?v=10"></script>
+<script src="config.js?v=11"></script>
+<script src="demo.js?v=11"></script>
+<script src="app.js?v=11"></script>
 </body>
 </html>
